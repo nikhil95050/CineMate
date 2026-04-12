@@ -1,0 +1,43 @@
+[project]
+name = "cinemate"
+version = "0.1.0"
+description = "CineMate – domain models and core config baseline"
+requires-python = ">=3.10"
+
+# Core runtime dependencies for this baseline
+dependencies = [
+  "pydantic>=2.0.0",
+  "python-dotenv>=1.0.0",
+  "redis>=5.0.0",
+  "httpx>=0.27.0",
+  "python-json-logger>=2.0.0",
+  "rq>=1.15.0",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+  "config",
+  "models",
+  "services",
+  "utils",
+  "handlers",
+  "clients",
+  "repositories",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+  "integration: marks tests as integration tests (deselect with '-m not integration')",
+]
