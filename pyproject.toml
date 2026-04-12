@@ -2,23 +2,25 @@
 name = "cinemate"
 version = "0.1.0"
 description = "CineMate – domain models and core config baseline"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 
 # Core runtime dependencies for this baseline
 dependencies = [
-  "pydantic>=2.0.0",
-  "python-dotenv>=1.0.0",
-  "redis>=5.0.0",
-  "httpx>=0.27.0",
-  "python-json-logger>=2.0.0",
-  "rq>=1.15.0",
-  "fastapi>=0.115.0",
-  "uvicorn>=0.30.0",
+  "pydantic>=2.12.0",
+  "python-dotenv>=1.2.2",
+  "redis>=7.4.0",
+  "httpx>=0.28.1",
+  "python-json-logger>=4.1.0",
+  "rq>=2.7.0",
+  "fastapi>=0.135.3",
+  "uvicorn>=0.44.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.0.0",
+  "pytest>=9.0.3",
+  "pytest-asyncio>=1.3.0",
+  "pytest-mock>=3.15.1",
 ]
 
 [build-system]
