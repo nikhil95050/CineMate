@@ -5,10 +5,10 @@ Expected columns:
     chat_id   text  (PK part)
     movie_id  text  (PK part)  — conflict key together with chat_id
     title     text
-    year      text
-    language  text
-    rating    text
-    genres    text
+    year      text  NOT NULL DEFAULT ''
+    language  text  NOT NULL DEFAULT ''
+    rating    text  NOT NULL DEFAULT ''
+    genres    text  NOT NULL DEFAULT ''
     added_at  timestamptz
 """
 from __future__ import annotations
@@ -33,10 +33,28 @@ _WATCHLIST_COLUMNS = frozenset(
     {"chat_id", "movie_id", "title", "year", "language", "rating", "genres", "added_at"}
 )
 
+# BUG #4 FIX — columns declared NOT NULL DEFAULT '' in the DB schema.
+# The DEFAULT only applies when the column is *omitted*; an explicit None
+# overrides the default and causes a NOT NULL constraint violation.
+# _coerce_nulls() converts None → "" for these columns before every DB write.
+_NOT_NULL_TEXT_COLS = frozenset({"title", "year", "language", "rating", "genres"})
+
 
 def _sanitise_for_db(row: Dict[str, Any]) -> Dict[str, Any]:
     """Return a copy of *row* containing only the watchlist schema columns."""
     return {k: v for k, v in row.items() if k in _WATCHLIST_COLUMNS}
+
+
+def _coerce_nulls(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of *row* with None → '' for NOT NULL text columns.
+
+    Must be called *after* _sanitise_for_db so only known columns remain.
+    """
+    coerced = dict(row)
+    for col in _NOT_NULL_TEXT_COLS:
+        if col in coerced and coerced[col] is None:
+            coerced[col] = ""
+    return coerced
 
 
 class WatchlistRepository:
@@ -56,6 +74,7 @@ class WatchlistRepository:
 
         The in-memory store keeps the full row for local queries; only the
         whitelisted schema columns are sent to Supabase (fix #11).
+        None values for NOT NULL text columns are coerced to '' (fix #4).
         """
         chat_id = str(chat_id)
         full_row = dict(row)
@@ -73,8 +92,10 @@ class WatchlistRepository:
 
         if sb.is_configured():
             try:
-                # Strip to schema columns only — prevents Supabase column errors
+                # 1. Strip to schema columns only (fix #11)
                 db_row = _sanitise_for_db(full_row)
+                # 2. Coerce None → '' for NOT NULL text columns (fix #4)
+                db_row = _coerce_nulls(db_row)
                 sb.insert_rows(
                     TABLE,
                     [db_row],
