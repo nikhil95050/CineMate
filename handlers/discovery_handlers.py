@@ -33,6 +33,38 @@ logger = get_logger("discovery_handlers")
 
 
 # ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _movie_to_dict(movie: MovieModel) -> Dict[str, Any]:
+    """Serialise a MovieModel to a plain dict exactly once.
+
+    All callers (session persistence, send_movies_async) share this single
+    serialisation so there is no repeated model_dump() round-trip and no
+    risk of a custom serialiser silently dropping fields on a second pass.
+    """
+    return movie.model_dump()
+
+
+def _streaming_label(streaming: Any) -> str:
+    """Return a safe string label for a streaming value.
+
+    Accepts str, list, dict, or None without raising.  Returns an empty
+    string when the value carries no meaningful information.
+    """
+    if streaming is None:
+        return ""
+    if isinstance(streaming, dict):
+        # e.g. {"Netflix": "https://..."} — join keys as the display label
+        label = ", ".join(str(k) for k in streaming if k)
+    elif isinstance(streaming, list):
+        label = ", ".join(str(s) for s in streaming if s)
+    else:
+        label = str(streaming)
+    return "" if label.upper() in ("", "N/A", "NONE") else label
+
+
+# ---------------------------------------------------------------------------
 # /star
 # ---------------------------------------------------------------------------
 
@@ -92,25 +124,39 @@ async def handle_star(
         )
         return
 
-    # --- Persist to history --------------------------------------------------
-    try:
-        for movie in movies:
+    # --- Serialise exactly once so all consumers share the same dict list ----
+    movie_dicts: List[Dict[str, Any]] = [_movie_to_dict(m) for m in movies]
+
+    # --- Persist to history (per-movie, logged individually) -----------------
+    history_failures = 0
+    for movie in movies:
+        try:
             history_service.add_to_history(chat_id_str, movie)
-    except Exception as exc:
-        logger.warning("[handle_star] history add failed: %s", exc)
+        except Exception as exc:
+            history_failures += 1
+            logger.warning(
+                "[handle_star] history add failed for %s: %s",
+                getattr(movie, 'movie_id', '?'),
+                exc,
+            )
+    if history_failures:
+        logger.warning(
+            "[handle_star] %d/%d movies failed to persist to history for chat_id=%s",
+            history_failures,
+            len(movies),
+            chat_id_str,
+        )
 
     # --- Update last_recs in session -----------------------------------------
     try:
         session_model: SessionModel = session_service.get_session(chat_id_str)
-        session_model.last_recs_json = json.dumps(
-            [m.model_dump() for m in movies]
-        )
+        session_model.last_recs_json = json.dumps(movie_dicts)
         session_service.upsert_session(session_model)
     except Exception as exc:
         logger.warning("[handle_star] session update failed: %s", exc)
 
-    # --- Send cards ----------------------------------------------------------
-    await send_movies_async(chat_id, [m.model_dump() for m in movies])
+    # --- Send cards (reuse already-serialised dicts, no second model_dump) ---
+    await send_movies_async(chat_id, movie_dicts)
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +174,7 @@ def _build_share_card(
 
     Each entry shows: title, year, rating, genres, reason, and streaming.
     The card is designed to be forwarded directly in Telegram.
+    streaming may be a str, list, or dict — _streaming_label() handles all.
     """
     lines: List[str] = [f"<b>{header}</b>", ""]
 
@@ -137,7 +184,8 @@ def _build_share_card(
         rating = rec.get("rating")
         genres = rec.get("genres") or ""
         reason = rec.get("reason") or ""
-        streaming = rec.get("streaming") or rec.get("streaming_platforms") or ""
+        streaming_raw = rec.get("streaming") or rec.get("streaming_platforms")
+        streaming_label = _streaming_label(streaming_raw)
 
         # Title line: "1. Inception (2010)  ⭐ 8.8"
         title_line = f"<b>{i}. {title}</b>"
@@ -158,9 +206,9 @@ def _build_share_card(
         if reason:
             lines.append(f"\U0001f4ac {reason}")
 
-        # Streaming info — only show when meaningful (not empty / N/A)
-        if streaming and str(streaming).upper() not in ("", "N/A", "NONE"):
-            lines.append(f"\U0001f4fa {streaming}")
+        # Streaming info — only show when meaningful
+        if streaming_label:
+            lines.append(f"\U0001f4fa {streaming_label}")
 
         lines.append("")  # blank separator
 
