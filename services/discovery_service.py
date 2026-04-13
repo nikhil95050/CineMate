@@ -164,16 +164,22 @@ async def _fetch_from_metadata_db(
     chat_id: str,
     repo: Optional[MovieMetadataRepository] = None,
 ) -> List[MovieModel]:
+    # Only derive genre/language for the structured repo.search() path.
+    # The raw supabase fallback is a last-resort catch-all; filtering there
+    # risks discarding the only available rows (e.g. 'surprise' mode passes a
+    # user with preferred_genres which would strip non-matching DB rows).
     genre: Optional[str] = None
     language: Optional[str] = None
-    if session:
-        genre = session.answers_genre or None
-        language = session.answers_language or None
-    if user and not genre and user.preferred_genres:
-        genre = user.preferred_genres[0] if user.preferred_genres else None
+    if repo is not None:
+        if session:
+            genre = session.answers_genre or None
+            language = session.answers_language or None
+        if user and not genre and user.preferred_genres:
+            genre = user.preferred_genres[0] if user.preferred_genres else None
 
     try:
         if repo is None:
+            # Raw supabase path — return all rows up to the candidate limit.
             rows_raw, err = await supabase_client.select_rows_async(
                 "movie_metadata",
                 limit=_LLM_CANDIDATE_COUNT,
@@ -188,6 +194,7 @@ async def _fetch_from_metadata_db(
                 return []
             rows = rows_raw
         else:
+            # Structured repo path — pass genre/language to the query.
             rows = await repo.search(
                 limit=_LLM_CANDIDATE_COUNT,
                 genre=genre,
@@ -198,19 +205,6 @@ async def _fetch_from_metadata_db(
                     "movie_metadata fallback returned nothing for mode=%s", mode
                 )
                 return []
-
-        if repo is None:
-            if genre:
-                rows = [
-                    r for r in rows
-                    if genre.lower() in (r.get("data_json") or {}).get("Genre", "").lower()
-                ]
-            if language:
-                rows = [
-                    r for r in rows
-                    if language.lower() in (r.get("data_json") or {}).get("Language", "").lower()
-                ]
-            rows = rows[:_LLM_CANDIDATE_COUNT]
 
         movies: List[MovieModel] = []
         for row in rows:
