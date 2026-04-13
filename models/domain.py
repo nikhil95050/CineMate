@@ -43,6 +43,68 @@ def _parse_jsonb_dict(v: Any) -> Optional[dict]:
     return None
 
 
+class StreamingInfo(BaseModel):
+    """Structured streaming availability for a movie.
+
+    Each entry describes a single platform on which the movie is available.
+    The ``display`` field is the human-readable summary previously stored in
+    ``MovieModel.streaming`` and is preserved for backwards compatibility.
+    """
+
+    display: str = Field(
+        default="",
+        description="Human-readable summary, e.g. 'Netflix, Prime Video'",
+    )
+    platforms: List[str] = Field(
+        default_factory=list,
+        description="Ordered list of platform names where the movie is available",
+    )
+    rent: List[str] = Field(
+        default_factory=list,
+        description="Platforms where the movie can be rented",
+    )
+    buy: List[str] = Field(
+        default_factory=list,
+        description="Platforms where the movie can be purchased",
+    )
+
+    @classmethod
+    def from_display_string(cls, raw: str | None) -> "StreamingInfo":
+        """Build a StreamingInfo from a legacy plain-text streaming string.
+
+        Parses comma/semicolon-separated platform names into ``platforms``.
+        Always safe to call — returns an empty StreamingInfo when *raw* is
+        None or blank.
+        """
+        if not raw or not raw.strip():
+            return cls()
+        display = raw.strip()
+        # Split on commas or semicolons, strip whitespace, drop empties
+        parts = [
+            p.strip()
+            for p in display.replace(";", ",").split(",")
+            if p.strip() and p.strip().upper() not in ("N/A", "NONE", "UNAVAILABLE")
+        ]
+        return cls(display=display, platforms=parts)
+
+    @property
+    def is_available(self) -> bool:
+        """True when at least one streaming/rent/buy platform is known."""
+        return bool(self.platforms or self.rent or self.buy)
+
+    def to_display(self) -> str:
+        """Return human-readable summary, falling back to platform list."""
+        if self.display:
+            return self.display
+        all_platforms = list(dict.fromkeys(self.platforms + self.rent + self.buy))
+        return ", ".join(all_platforms) if all_platforms else "Not available"
+
+    @field_validator("platforms", "rent", "buy", mode="before")
+    @classmethod
+    def _coerce_list(cls, v: Any) -> list:
+        return _parse_jsonb_list(v)
+
+
 class MovieModel(BaseModel):
     """Normalized movie entity used inside the bot.
 
@@ -66,19 +128,68 @@ class MovieModel(BaseModel):
     poster: Optional[str] = Field(None, description="Poster URL")
     trailer: Optional[str] = Field(None, description="Trailer URL or search link")
 
-    # Additional fields used only in bot UX
+    # --- Streaming availability ---
+    # ``streaming`` keeps the legacy plain-string for backwards compatibility
+    # with DB columns, formatter code, and existing history rows.
+    # ``streaming_info`` is the new structured representation that allows
+    # per-platform access, rent/buy distinction, and availability checks.
+    # They are kept in sync: whenever ``streaming`` is set via from_history_row
+    # or model construction, ``streaming_info`` is derived automatically.
     streaming: Optional[str] = Field(
-        None, description="Human-readable streaming availability summary"
+        None, description="Human-readable streaming availability summary (legacy)"
     )
+    streaming_info: StreamingInfo = Field(
+        default_factory=StreamingInfo,
+        description="Structured streaming availability with per-platform detail",
+    )
+
     reason: Optional[str] = Field(
         None, description="Why this movie was recommended (LLM explanation)"
     )
+
+    # ------------------------------------------------------------------
+    # Validators
+    # ------------------------------------------------------------------
+
+    @field_validator("streaming_info", mode="before")
+    @classmethod
+    def _coerce_streaming_info(cls, v: Any) -> Any:
+        """Accept a raw dict, a StreamingInfo instance, or None."""
+        if v is None:
+            return StreamingInfo()
+        if isinstance(v, StreamingInfo):
+            return v
+        if isinstance(v, dict):
+            return StreamingInfo(**v)
+        # Fallback: treat as a display string
+        if isinstance(v, str):
+            return StreamingInfo.from_display_string(v)
+        return StreamingInfo()
+
+    def model_post_init(self, __context: Any) -> None:  # type: ignore[override]
+        """Sync streaming_info.display with streaming when streaming_info was
+        not explicitly supplied (i.e. the caller only set streaming)."""
+        if self.streaming and not self.streaming_info.display:
+            # Derive structured info from the legacy string
+            object.__setattr__(
+                self,
+                "streaming_info",
+                StreamingInfo.from_display_string(self.streaming),
+            )
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
 
     @property
     def genre_list(self) -> List[str]:
         if not self.genres:
             return []
         return [g.strip() for g in self.genres.split(",") if g.strip()]
+
+    # ------------------------------------------------------------------
+    # Conversion helpers
+    # ------------------------------------------------------------------
 
     def to_history_row(self, chat_id: str) -> Dict[str, Any]:
         """Shape compatible with HistoryRepository._map_to_supabase.
@@ -103,6 +214,10 @@ class MovieModel(BaseModel):
             rating = float(rating_raw) if rating_raw not in (None, "") else None
         except ValueError:
             rating = None
+
+        streaming_raw: str | None = row.get("streaming") or None
+        streaming_info = StreamingInfo.from_display_string(streaming_raw)
+
         return cls(
             movie_id=str(row.get("movie_id", "")),
             title=row.get("title", ""),
@@ -113,6 +228,8 @@ class MovieModel(BaseModel):
             description=row.get("description") or None,
             poster=row.get("poster") or None,
             trailer=row.get("trailer") or None,
+            streaming=streaming_raw,
+            streaming_info=streaming_info,
         )
 
     def to_watchlist_row(self, chat_id: str) -> Dict[str, Any]:
