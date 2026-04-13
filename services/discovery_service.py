@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from clients import omdb_client, perplexity_client
@@ -77,9 +78,24 @@ def _build_similarity_prompt(seed_title: str) -> str:
 
 
 def _build_trending_prompt() -> str:
+    """Build a trending prompt anchored to a concrete, verifiable year range.
+
+    Fix #18: the previous prompt used the vague phrase 'last 12 months'.
+    LLMs have a training cutoff and cannot know what was *actually* released
+    in a rolling recent window — they confidently hallucinate titles or
+    return films from their training window regardless of the bot's run date.
+
+    The fix injects the *current* calendar year and the previous year at
+    call-time so the LLM is asked about a concrete range it was trained on,
+    producing real, verifiable titles instead of hallucinated ones.
+    """
+    current_year = datetime.now(tz=timezone.utc).year
+    prev_year = current_year - 1
     return (
-        f"List exactly {_LLM_CANDIDATE_COUNT} trending or critically acclaimed movies "
-        "from the last 12 months. Mix genres. Return only the JSON array as instructed."
+        f"List exactly {_LLM_CANDIDATE_COUNT} highly acclaimed or widely watched films "
+        f"released in {current_year} or {prev_year}. "
+        "Mix genres. Prioritise films with strong critical or audience reception. "
+        "Return only the JSON array as instructed."
     )
 
 
@@ -165,9 +181,6 @@ async def _fetch_from_metadata_db(
     repo: Optional[MovieMetadataRepository] = None,
 ) -> List[MovieModel]:
     # Only derive genre/language for the structured repo.search() path.
-    # The raw supabase fallback is a last-resort catch-all; filtering there
-    # risks discarding the only available rows (e.g. 'surprise' mode passes a
-    # user with preferred_genres which would strip non-matching DB rows).
     genre: Optional[str] = None
     language: Optional[str] = None
     if repo is not None:
@@ -179,7 +192,6 @@ async def _fetch_from_metadata_db(
 
     try:
         if repo is None:
-            # Raw supabase path — return all rows up to the candidate limit.
             rows_raw, err = await supabase_client.select_rows_async(
                 "movie_metadata",
                 limit=_LLM_CANDIDATE_COUNT,
@@ -194,7 +206,6 @@ async def _fetch_from_metadata_db(
                 return []
             rows = rows_raw
         else:
-            # Structured repo path — pass genre/language to the query.
             rows = await repo.search(
                 limit=_LLM_CANDIDATE_COUNT,
                 genre=genre,
@@ -364,11 +375,7 @@ class DiscoveryService:
         chat_id: str = "system",
         request_id: str = "N/A",
     ) -> List[MovieModel]:
-        """Return notable movies for *star_name* (actor or director).
-
-        Uses the same LLM + OMDb enrichment pipeline as discover().
-        Returns an empty list (never raises) when the star cannot be found.
-        """
+        """Return notable movies for *star_name* (actor or director)."""
         star_name = star_name.strip()
         if not star_name:
             return []
