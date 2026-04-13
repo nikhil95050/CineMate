@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from clients.telegram_card import send_movies_async
 from clients.telegram_helpers import build_question_keyboard, send_message, show_typing
@@ -16,6 +16,26 @@ logger = logging.getLogger(__name__)
 # Accessing it via `import services.container as _container` inside each
 # function means monkeypatch.setattr(container, "session_service", fake)
 # is always respected — the module attribute lookup happens at call time.
+
+
+def _serialise_movies(movies: list) -> List[Dict[str, Any]]:
+    """Convert a list of MovieModel objects (or dicts) to plain dicts.
+
+    send_movies_async (and build_movie_card_text inside it) expects a list of
+    plain dicts with .get() access.  Pydantic models do NOT support .get(),
+    so passing them directly causes AttributeError / KeyError at render time.
+    """
+    result = []
+    for m in movies:
+        if isinstance(m, dict):
+            result.append(m)
+        elif hasattr(m, "model_dump"):   # Pydantic v2
+            result.append(m.model_dump())
+        elif hasattr(m, "dict"):         # Pydantic v1
+            result.append(m.dict())
+        else:
+            result.append({})
+    return result
 
 
 async def handle_questioning(
@@ -161,6 +181,7 @@ async def _finalize(chat_id: Any, session_model: SessionModel) -> None:
         )
         movies = []
 
+    # Serialise to plain dicts for session storage
     try:
         serialised = json.dumps(
             [
@@ -181,4 +202,5 @@ async def _finalize(chat_id: Any, session_model: SessionModel) -> None:
         )
         return
 
-    await send_movies_async(chat_id, movies)
+    # Fix #3 — send_movies_async expects plain dicts, not MovieModel objects.
+    await send_movies_async(chat_id, _serialise_movies(movies))
