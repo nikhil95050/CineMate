@@ -10,6 +10,12 @@ Circuit-breaker states
   HALF-OPEN – recovery window expired; next call is a probe.
               On success → CLOSED.  On failure → OPEN again.
 
+Priority order in is_healthy()
+───────────────────────────────
+  1. Daily budget guard          (always respected)
+  2. Manual feature-flag disable (admin toggle always wins)
+  3. Circuit-breaker state       (OPEN / HALF-OPEN / CLOSED)
+
 app_config keys used
 ────────────────────
   provider.<name>.enabled             → "true" | "false"  (manual toggle)
@@ -25,7 +31,7 @@ from typing import Optional
 
 logger = logging.getLogger("health_service")
 
-# ── Thresholds ──────────────────────────────────────────────────────────────
+# ── Thresholds ───────────────────────────────────────────────────────
 FAILURE_THRESHOLD: int = 3        # consecutive failures before circuit opens
 RECOVERY_WINDOW:   int = 120      # seconds before half-open probe is allowed
 
@@ -50,18 +56,44 @@ class HealthService:
     def __init__(self, admin_repo) -> None:
         self._repo = admin_repo
 
-    # ── Public API (called by clients) ──────────────────────────────────────
+    # ── Public API (called by clients) ─────────────────────────────────────
 
     def is_healthy(self, provider: str) -> bool:
-        """Return True when the provider circuit is CLOSED or HALF-OPEN (probe)."""
+        """Return True when the provider circuit is CLOSED or HALF-OPEN (probe).
+
+        Priority:
+          1. Daily budget guard  – respected unconditionally.
+          2. Manual admin toggle – if an admin explicitly disabled the provider
+             via /admin_disable_provider, that decision is always honoured,
+             even if the circuit would otherwise enter HALF-OPEN.
+          3. Circuit-breaker     – OPEN / HALF-OPEN / CLOSED logic.
+        """
         # 1. Daily budget guard (always respected regardless of circuit state)
         if self._over_daily_budget(provider):
             logger.warning("[Health] %s exceeded daily call budget", provider)
             return False
 
-        # 2. Circuit-breaker state – evaluated BEFORE the feature flag so that
-        #    the half-open probe is allowed even when report_failure() wrote
-        #    enabled=false to signal the open circuit.
+        # 2. Manual feature-flag check – admin disable always wins.
+        #    This is evaluated BEFORE the circuit-breaker so that a provider
+        #    disabled via /admin_disable_provider cannot be accidentally
+        #    re-probed by the HALF-OPEN recovery logic.
+        flag = self._repo.get_config(f"provider.{provider}.enabled")
+        if flag is not None and flag.lower() == "false":
+            # Only block if the circuit was manually disabled (failure_count == 0
+            # or the flag was set by an admin, not by report_failure hitting the
+            # threshold).  We detect a manual disable by checking whether
+            # failure_count is below the threshold – if the circuit was opened
+            # automatically by report_failure, we still want HALF-OPEN recovery
+            # so the circuit can heal itself.  If an admin explicitly disabled
+            # the provider (failure_count < FAILURE_THRESHOLD), block the call.
+            failures = self._get_failure_count(provider)
+            if failures < FAILURE_THRESHOLD:
+                logger.debug("[Health] %s manually disabled by admin", provider)
+                return False
+            # flag=false was written by report_failure — fall through to
+            # circuit-breaker logic so HALF-OPEN recovery still works.
+
+        # 3. Circuit-breaker state
         failures = self._get_failure_count(provider)
         if failures >= FAILURE_THRESHOLD:
             last_failure = self._get_last_failure_time(provider)
@@ -82,13 +114,6 @@ class HealthService:
                 return False
             # No timestamp stored → treat as healthy
             return True
-
-        # 3. Manual feature-flag check (only relevant when circuit is CLOSED,
-        #    i.e. failures < FAILURE_THRESHOLD)
-        flag = self._repo.get_config(f"provider.{provider}.enabled")
-        if flag is not None and flag.lower() == "false":
-            logger.debug("[Health] %s manually disabled", provider)
-            return False
 
         return True  # CLOSED
 
@@ -151,7 +176,7 @@ class HealthService:
             "daily_budget": DAILY_BUDGET.get(provider),
         }
 
-    # ── Daily budget helpers ─────────────────────────────────────────────────
+    # ── Daily budget helpers ──────────────────────────────────────────────
 
     def _over_daily_budget(self, provider: str) -> bool:
         budget = DAILY_BUDGET.get(provider)
@@ -167,7 +192,7 @@ class HealthService:
         except (ValueError, TypeError):
             return 0
 
-    # ── Persistence helpers ──────────────────────────────────────────────────
+    # ── Persistence helpers ──────────────────────────────────────────────
 
     def _get_failure_count(self, provider: str) -> int:
         val = self._repo.get_config(f"provider.{provider}.failure_count")
