@@ -24,6 +24,20 @@ logger = logging.getLogger("watchlist_repo")
 TABLE = "watchlist"
 PAGE_SIZE = 10
 
+# Fix #11 — whitelist of columns that exist in the watchlist Supabase table.
+# Any extra keys that arrive from MovieModel.model_dump() (description, poster,
+# trailer, streaming_info, reason, etc.) would cause Supabase to reject the
+# upsert with an "unknown column" error.  We strip to this set before every
+# DB write while keeping the full row in the in-memory store.
+_WATCHLIST_COLUMNS = frozenset(
+    {"chat_id", "movie_id", "title", "year", "language", "rating", "genres", "added_at"}
+)
+
+
+def _sanitise_for_db(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of *row* containing only the watchlist schema columns."""
+    return {k: v for k, v in row.items() if k in _WATCHLIST_COLUMNS}
+
 
 class WatchlistRepository:
     """CRUD + pagination for the watchlist table."""
@@ -38,13 +52,17 @@ class WatchlistRepository:
     def add_to_watchlist(
         self, chat_id: str, row: Dict[str, Any]
     ) -> bool:
-        """Upsert a single watchlist row. Returns True on success."""
+        """Upsert a single watchlist row. Returns True on success.
+
+        The in-memory store keeps the full row for local queries; only the
+        whitelisted schema columns are sent to Supabase (fix #11).
+        """
         chat_id = str(chat_id)
         full_row = dict(row)
         full_row["chat_id"] = chat_id
         full_row.setdefault("added_at", utc_now_iso())
 
-        # In-memory store
+        # In-memory store — keep full row so local get_by_movie_id works
         existing = {r["movie_id"]: r for r in self._store.get(chat_id, [])}
         existing[full_row["movie_id"]] = full_row
         self._store[chat_id] = sorted(
@@ -55,9 +73,11 @@ class WatchlistRepository:
 
         if sb.is_configured():
             try:
+                # Strip to schema columns only — prevents Supabase column errors
+                db_row = _sanitise_for_db(full_row)
                 sb.insert_rows(
                     TABLE,
-                    [full_row],
+                    [db_row],
                     upsert=True,
                     on_conflict="chat_id,movie_id",
                 )
