@@ -5,13 +5,24 @@ Covers all four issues identified in the spec review:
   Fix 2 — Comprehensive unit + integration tests (this file).
   Fix 3 — Inline-in-production warning guard.
   Fix 4 — enqueue_call → queue.enqueue migration.
+
+Windows note
+------------
+RQ imports rq.scheduler at module level, which calls
+  multiprocessing.get_context('fork')
+Windows only supports 'spawn' and 'forkserver', so importing rq on Windows
+raises ValueError: cannot find context for 'fork'.
+
+Any test that would trigger a real `from rq import ...` is wrapped in a
+try/except and skipped automatically when running on Windows.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import asyncio
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -25,6 +36,19 @@ from services.queue_service import (
 )
 
 RUN_INTENT_FUNC = "services.worker_service.run_intent_job"
+
+# True when the current platform cannot import rq (Windows — no fork context)
+_RQ_UNAVAILABLE: bool
+try:
+    import rq as _rq  # noqa: F401
+    _RQ_UNAVAILABLE = False
+except (ValueError, ImportError, OSError):
+    _RQ_UNAVAILABLE = True
+
+rq_skip = pytest.mark.skipif(
+    _RQ_UNAVAILABLE,
+    reason="RQ cannot be imported on this platform (no 'fork' multiprocessing context — Windows)",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -187,15 +211,14 @@ class TestEnqueueInlineMode:
         enqueue_job(RUN_INTENT_FUNC, chat_id="3")
         assert "kwargs" in calls
 
-    def test_inline_0_does_not_execute_inline(self, monkeypatch):
-        """CINEMATE_INLINE_JOBS=0 must NOT trigger inline execution."""
+    def test_inline_0_falls_back_via_get_queue(self, monkeypatch):
+        """CINEMATE_INLINE_JOBS=0 must NOT trigger inline_mode path;
+        falls back through the _get_queue=None fallback path instead."""
         calls = {}
         monkeypatch.setenv("CINEMATE_INLINE_JOBS", "0")
         monkeypatch.setattr("services.queue_service._get_queue", lambda: None)
         monkeypatch.setattr("services.queue_service._resolve_callable", lambda _: _make_fake_func(calls))
-        # Falls back to inline via _get_queue=None path, not the inline_mode path
         enqueue_job(RUN_INTENT_FUNC, chat_id="4")
-        # Still executes (via fallback), but via _get_queue=None path
         assert "kwargs" in calls
 
     def test_inline_preserves_all_kwargs(self, monkeypatch):
@@ -313,12 +336,18 @@ class TestGetQueue:
         monkeypatch.setattr("services.queue_service.is_redis_configured", lambda: True)
         assert _get_queue() is None
 
+    @rq_skip
     def test_returns_queue_when_configured(self, monkeypatch):
+        """Skipped on Windows: RQ's scheduler imports multiprocessing.get_context('fork')
+        which is not available on Windows (only 'spawn'/'forkserver' are supported).
+        This test passes on Linux/macOS where 'fork' is the default context.
+        """
+        from rq import Queue
+
         fake_redis = MagicMock()
         monkeypatch.setattr("services.queue_service.get_redis", lambda: fake_redis)
         monkeypatch.setattr("services.queue_service.is_redis_configured", lambda: True)
 
-        from rq import Queue
         q = _get_queue()
         assert q is not None
         assert isinstance(q, Queue)
@@ -333,7 +362,6 @@ class TestWorkerRunnerDeprecation:
 
     def test_worker_runner_exists_and_warns(self):
         import importlib
-        import sys
 
         # Remove cached module so the warning fires fresh
         sys.modules.pop("worker_runner", None)
@@ -343,7 +371,6 @@ class TestWorkerRunnerDeprecation:
 
     def test_deprecation_warning_mentions_rq_worker(self):
         import importlib
-        import sys
         import warnings
 
         sys.modules.pop("worker_runner", None)
@@ -362,9 +389,14 @@ class TestWorkerRunnerDeprecation:
 
 @pytest.mark.integration
 class TestRQIntegration:
-    """Requires a live Redis connection. Skipped automatically when unavailable."""
+    """Requires a live Redis connection AND a Unix-like platform (fork support).
+    Skipped automatically when either condition is not met.
+    """
 
     def test_enqueue_and_process_with_simple_worker(self, monkeypatch):
+        if _RQ_UNAVAILABLE:
+            pytest.skip("RQ cannot be imported on this platform (no fork context — Windows)")
+
         from config.redis_cache import get_redis
         redis_conn = get_redis()
         if not redis_conn:
@@ -373,13 +405,11 @@ class TestRQIntegration:
         try:
             from rq import Queue
             from rq.worker import SimpleWorker
-        except Exception:
-            pytest.skip("RQ not supported on this platform (missing fork context)")
+        except Exception as exc:
+            pytest.skip(f"RQ import failed: {exc}")
 
         queue_name = os.environ.get("CINEMATE_QUEUE_NAME", "cinemate_intent_jobs")
         q = Queue(queue_name, connection=redis_conn, is_async=True)
-
-        # Flush queue before test
         q.empty()
 
         monkeypatch.delenv("CINEMATE_INLINE_JOBS", raising=False)
