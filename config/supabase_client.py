@@ -93,6 +93,10 @@ def _format_filter(value: Any) -> str:
     return f"eq.{value}"
 
 
+# ---------------------------------------------------------------------------
+# Async read/write helpers
+# ---------------------------------------------------------------------------
+
 async def select_rows_async(
     table: str,
     filters: Optional[Dict[str, Any]] = None,
@@ -127,6 +131,39 @@ async def insert_rows_async(
     params = {"on_conflict": on_conflict} if on_conflict else None
     return await _request_async("POST", table, params=params, json_body=rows, prefer=prefer)
 
+
+async def update_rows_async(
+    table: str,
+    patch: Dict[str, Any],
+    filters: Dict[str, Any],
+) -> Tuple[Optional[Any], Optional[str]]:
+    """Async PATCH for a single table subset. Fix #17: replaces sync update_rows()
+    in async call paths so the event loop is never blocked."""
+    params = {key: _format_filter(value) for key, value in (filters or {}).items()}
+    return await _request_async(
+        "PATCH",
+        table,
+        params=params,
+        json_body=patch,
+        prefer="return=representation",
+    )
+
+
+async def delete_rows_async(
+    table: str,
+    filters: Dict[str, Any],
+) -> Tuple[Optional[Any], Optional[str]]:
+    """Async DELETE for a single table subset. Fix #17: replaces sync delete_rows()
+    in async call paths so the event loop is never blocked."""
+    params = {key: _format_filter(value) for key, value in (filters or {}).items()}
+    return await _request_async(
+        "DELETE", table, params=params, prefer="return=representation"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sync read/write helpers (kept for background/non-async callers)
+# ---------------------------------------------------------------------------
 
 def select_rows(
     table: str,
