@@ -30,14 +30,8 @@ ADMIN_IDS: set[str] = set(
 )
 
 # ---------------------------------------------------------------------------
-# Request size limit (Fix: large-request handling)
+# Request size limit
 # ---------------------------------------------------------------------------
-# Telegram webhook payloads are small JSON objects (a few KB at most).
-# We reject any request body exceeding 1 MB to guard against:
-#   - Accidental or malicious oversized payloads
-#   - Memory pressure / slow-request attacks
-# Telegram will receive HTTP 413 and stop retrying that update, which is the
-# correct behaviour for a permanently-invalid request.
 MAX_REQUEST_BODY_BYTES: int = int(
     os.environ.get("CINEMATE_MAX_REQUEST_BYTES", str(1 * 1024 * 1024))  # 1 MB default
 )
@@ -49,6 +43,11 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
     Two-stage check:
     1. Content-Length header (fast path, no body read required).
     2. Actual body bytes read (covers chunked-encoding where no header is set).
+
+    BUG-7 NOTE: Starlette caches the result of await request.body() on the
+    Request object itself, so downstream handlers calling await request.json()
+    will re-use the cached bytes rather than consuming the stream a second
+    time.  This is safe and correct behaviour with BaseHTTPMiddleware.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -69,8 +68,7 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
             except ValueError:
                 pass  # Malformed header -- let the handler deal with it
 
-        # Slow path: no Content-Length (chunked transfer encoding)
-        # Read up to limit + 1 bytes to detect oversize without buffering entire body.
+        # Slow path: read body (Starlette caches it; downstream reads are free)
         body = await request.body()
         if len(body) > MAX_REQUEST_BODY_BYTES:
             logger.warning(
@@ -105,7 +103,10 @@ async def _keepalive_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.ensure_future(_keepalive_loop())
+    # M-5 FIX: asyncio.ensure_future() is deprecated since Python 3.10+.
+    # asyncio.create_task() is the correct API for scheduling a coroutine
+    # as a background task when an event loop is already running.
+    asyncio.create_task(_keepalive_loop())
     yield
 
 
@@ -193,10 +194,6 @@ async def debug_start():
 # ---------------------------------------------------------------------------
 # Webhook
 # ---------------------------------------------------------------------------
-# NOTE: The GET /webhook/{token} endpoint has been intentionally removed.
-# It was not part of the spec and could confuse Telegram's webhook diagnostics
-# (Telegram only uses POST). A GET to this path now returns 405 Method Not
-# Allowed, which is the correct HTTP response.
 
 @app.post("/webhook/{token}")
 async def telegram_webhook(token: str, request: Request):
@@ -244,7 +241,7 @@ async def telegram_webhook(token: str, request: Request):
     except Exception:
         session_row = {}
 
-    # -- Load real user row (CC-1) -------------------------------------------
+    # -- Load real user row --------------------------------------------------
     user_row = {}
     try:
         from services.container import user_service as _us

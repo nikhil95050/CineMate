@@ -7,6 +7,7 @@ Fallback path (Feature 10):
 
 BUG #3 FIX: increment bot_stats (total_interactions / total_errors) on every intent.
 BUG #8 FIX: capture bot_response_text via contextvars so log_interaction is populated.
+BUG-10 FIX: handle_start() called with keyword arguments to match its signature.
 """
 from __future__ import annotations
 
@@ -64,7 +65,14 @@ async def run_intent_job(
     try:
         if intent == "start":
             from handlers.user_handlers import handle_start
-            await handle_start(chat_id_str, username, session, user)
+            # BUG-10 FIX: use keyword arguments to match handle_start's signature
+            # instead of positional args which break when the signature changes.
+            await handle_start(
+                chat_id=chat_id_str,
+                username=username,
+                session=session,
+                user=user,
+            )
 
         elif intent == "help":
             from handlers.user_handlers import handle_help
@@ -188,7 +196,7 @@ async def run_intent_job(
                 if classified and classified != "unknown":
                     LoggingService.log_event(
                         chat_id=chat_id_str,
-                        intent=f"fallback→{classified}",
+                        intent=f"fallback\u2192{classified}",
                         step="semantic_redirect",
                         request_id=request_id,
                         provider="semantic",

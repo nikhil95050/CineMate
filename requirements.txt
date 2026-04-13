@@ -5,7 +5,6 @@ apify_shared==2.2.0
 blinker==1.9.0
 certifi==2026.2.25
 charset-normalizer==3.4.7
--e git+https://github.com/nikhil95050/CineMate.git@e0f8da7955508eee3d3ccea0c23a92716ee03fed#egg=cinemate
 click==8.3.2
 colorama==0.4.6
 croniter==6.2.2

@@ -2,6 +2,16 @@
 
 BUG #5 FIX: on is_admin(), fall back to ADMIN_CHAT_IDS env var when the DB
             admins table is empty or unavailable, and seed the table on first use.
+
+BUG-ADM-1 FIX: get_recent_errors() was passing unsupported `order_by` and
+               `order_desc` keyword arguments to select_rows().  The function
+               only accepts an `order` string param (PostgREST format:
+               "column.desc").  Fixed to use order="timestamp.desc".
+
+BUG-ADM-2 FIX: get_all_stats() and increment_stat() were using the wrong
+               column names (`metric_name` / `metric_value`).  The live DB
+               schema defines `stat_name` / `stat_value`.  Both methods now
+               use the correct column names.
 """
 from __future__ import annotations
 
@@ -121,42 +131,55 @@ class AdminRepository:
     # ------------------------------------------------------------------
 
     def get_all_stats(self) -> Dict[str, int]:
+        """BUG-ADM-2 FIX: use stat_name / stat_value (live DB column names)."""
         if sb.is_configured():
             try:
                 res, err = sb.select_rows("bot_stats", limit=200)
                 if err:
                     return {}
-                return {row["metric_name"]: int(row["metric_value"]) for row in (res or [])}
+                return {
+                    row["stat_name"]: int(row["stat_value"])
+                    for row in (res or [])
+                    if "stat_name" in row
+                }
             except Exception as exc:
                 logger.warning("[AdminRepo] get_all_stats exception: %s", exc)
                 return {}
         return dict(_stats_store)
 
-    def increment_stat(self, metric_name: str, by: int = 1) -> None:
+    def increment_stat(self, stat_name: str, by: int = 1) -> None:
+        """BUG-ADM-2 FIX: use stat_name / stat_value (live DB column names).
+
+        Uses an upsert so the row is created automatically if it does not
+        exist yet (e.g. after a fresh deployment before bot_stats is seeded).
+        """
         if sb.is_configured():
             try:
-                existing = self.get_all_stats().get(metric_name, 0)
+                existing = self.get_all_stats().get(stat_name, 0)
                 sb.upsert_rows(
                     "bot_stats",
-                    [{"metric_name": metric_name, "metric_value": existing + by}],
-                    on_conflict="metric_name",
+                    [{"stat_name": stat_name, "stat_value": existing + by}],
+                    on_conflict="stat_name",
                 )
             except Exception as exc:
                 logger.warning("[AdminRepo] increment_stat exception: %s", exc)
         else:
-            _stats_store[metric_name] = _stats_store.get(metric_name, 0) + by
+            _stats_store[stat_name] = _stats_store.get(stat_name, 0) + by
 
     # ------------------------------------------------------------------
     # Error logs
     # ------------------------------------------------------------------
 
     def get_recent_errors(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """BUG-ADM-1 FIX: select_rows() accepts `order` (PostgREST string),
+        not the non-existent `order_by` / `order_desc` kwargs that were
+        previously passed and silently ignored (causing unordered results).
+        """
         if sb.is_configured():
             try:
                 res, err = sb.select_rows(
                     "error_logs",
-                    order_by="timestamp",
-                    order_desc=True,
+                    order="timestamp.desc",
                     limit=limit,
                 )
                 return res or []
@@ -179,7 +202,7 @@ class AdminRepository:
                 ).isoformat()
                 res, err = sb.select_rows(
                     "api_usage",
-                    filters={"timestamp__gte": since},
+                    filters={"timestamp": f"gte.{since}"},
                     limit=5000,
                 )
                 if err or not res:

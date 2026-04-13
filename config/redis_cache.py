@@ -188,6 +188,13 @@ _seen_lock = threading.Lock()
 
 
 def mark_processed_update(update_id: str) -> bool:
+    """Return True if this update_id is new (not yet processed).
+
+    BUG-9 FIX: expired keys are purged BEFORE the duplicate check so that
+    an update whose TTL has elapsed is NOT incorrectly treated as a duplicate.
+    Previously, the cleanup ran after the check, meaning stale entries were
+    never evicted before they were tested.
+    """
     key = f"processed_update:{update_id}"
     client = get_redis()
     if client:
@@ -197,17 +204,22 @@ def mark_processed_update(update_id: str) -> bool:
             logger.debug(f"Redis Dedup error: {e}")
 
     with _seen_lock:
-        if update_id in _seen_updates:
-            return False
-        cutoff = time.time()
-        expired = [k for k, v in _seen_updates.items() if v < cutoff]
+        now = time.time()
+
+        # BUG-9 FIX: purge expired entries FIRST, then check for duplicates.
+        expired = [k for k, v in _seen_updates.items() if v < now]
         for k in expired:
             del _seen_updates[k]
+
+        if update_id in _seen_updates:
+            return False
+
         if len(_seen_updates) >= 5000:
             oldest_keys = sorted(_seen_updates, key=_seen_updates.get)[:1000]
             for k in oldest_keys:
                 del _seen_updates[k]
-        _seen_updates[update_id] = time.time() + 3600
+
+        _seen_updates[update_id] = now + 3600
     return True
 
 
@@ -216,18 +228,25 @@ def is_rate_limited(
 ) -> bool:
     """Tiered rate limiter.
 
-    - user: 12 recs / min
-    - vip: 30 recs / min
-    - admin: unlimited (999)
-    """
+    - admin: 999 recs / min
+    - vip:   30  recs / min
+    - user:  honours the caller-supplied `limit` (default 12 recs / min)
 
+    BUG-8 FIX: the previous implementation unconditionally overwrote `limit`
+    with the hard-coded tier default (12) in the else branch, silently
+    ignoring any value the caller passed.  The fix uses a separate
+    `effective_limit` variable so the caller's value is respected for
+    non-admin, non-vip tiers.
+    """
     full_key = f"rate_limit:{key}"
+
+    # BUG-8 FIX: derive effective limit without clobbering the parameter.
     if user_tier == "admin":
-        limit = 999
+        effective_limit = 999
     elif user_tier == "vip":
-        limit = 30
+        effective_limit = 30
     else:
-        limit = 12
+        effective_limit = limit  # honour the caller's value
 
     client = get_redis()
     if client:
@@ -240,7 +259,7 @@ def is_rate_limited(
         """
         try:
             current = client.eval(lua_script, 1, full_key, window_seconds)
-            return int(current) > limit
+            return int(current) > effective_limit
         except Exception as e:  # pragma: no cover - defensive
             logger.debug(f"Redis Rate limit error: {e}")
 
@@ -252,7 +271,7 @@ def is_rate_limited(
             return False
         new_val = val + 1
         _local_cache[full_key] = (new_val, expiry)
-        return new_val > limit
+        return new_val > effective_limit
 
 
 def increment(key: str, amount: int = 1) -> int:
