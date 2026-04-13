@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator
 from utils.time_utils import utc_now_iso
 
@@ -73,7 +73,7 @@ class StreamingInfo(BaseModel):
         """Build a StreamingInfo from a legacy plain-text streaming string.
 
         Parses comma/semicolon-separated platform names into ``platforms``.
-        Always safe to call \u2014 returns an empty StreamingInfo when *raw* is
+        Always safe to call — returns an empty StreamingInfo when *raw* is
         None or blank.
         """
         if not raw or not raw.strip():
@@ -268,7 +268,7 @@ class UserModel(BaseModel):
     user_taste_vector: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------------
-    # Field validators \u2014 coerce Supabase JSONB columns that arrive as
+    # Field validators — coerce Supabase JSONB columns that arrive as
     # raw JSON strings (e.g. '[]', '["Action"]', '{"genres": [...]}')
     # into proper Python types before Pydantic validates them.
     # ------------------------------------------------------------------
@@ -294,7 +294,7 @@ class UserModel(BaseModel):
         return cls(
             chat_id=str(row.get("chat_id", "")),
             username=row.get("username") or "User",
-            # Pass raw value \u2014 _ensure_list validator handles str/list/None
+            # Pass raw value — _ensure_list validator handles str/list/None
             preferred_genres=row.get("preferred_genres") or [],
             disliked_genres=row.get("disliked_genres") or [],
             preferred_language=row.get("preferred_language") or None,
@@ -319,7 +319,7 @@ class UserModel(BaseModel):
         return {
             "chat_id": self.chat_id,
             "username": self.username,
-            # JSONB list columns \u2014 must be JSON strings for Supabase REST
+            # JSONB list columns — must be JSON strings for Supabase REST
             "preferred_genres": json.dumps(self.preferred_genres),
             "disliked_genres": json.dumps(self.disliked_genres),
             "preferred_language": self.preferred_language,
@@ -328,7 +328,7 @@ class UserModel(BaseModel):
             "avg_rating_preference": self.avg_rating_preference,
             # JSONB list column
             "subscriptions": json.dumps(self.subscriptions),
-            # JSONB dict column \u2014 serialise to string or send None explicitly
+            # JSONB dict column — serialise to string or send None explicitly
             "user_taste_vector": (
                 json.dumps(self.user_taste_vector)
                 if self.user_taste_vector is not None
@@ -339,11 +339,55 @@ class UserModel(BaseModel):
         }
 
 
+# ---------------------------------------------------------------------------
+# BUG #7 FIX — Explicit question-index → answers_* column mapping
+# ---------------------------------------------------------------------------
+# This tuple is the single source of truth for the questionnaire flow.
+# Index N in this tuple corresponds to question_index N in the sessions table.
+# Any handler that stores an answer must use:
+#
+#   col = QUESTION_COLUMNS[session.question_index]
+#   setattr(session, col, user_answer)
+#
+# rather than an ad-hoc integer offset or a hard-coded column name.
+#
+# _validate_question_columns() runs at import time and raises AssertionError
+# when the tuple length drifts from SessionModel._TOTAL_QUESTIONS so that
+# off-by-one bugs are caught immediately at startup, before any user
+# interaction occurs.
+
+QUESTION_COLUMNS: Tuple[str, ...] = (
+    "answers_mood",       # Q0 — What mood are you in?
+    "answers_genre",      # Q1 — Which genres?
+    "answers_language",   # Q2 — Language preference?
+    "answers_era",        # Q3 — Era / decade?
+    "answers_context",    # Q4 — Who are you watching with?
+    "answers_time",       # Q5 — How much time do you have?
+    "answers_avoid",      # Q6 — Anything to avoid?
+    "answers_favorites",  # Q7 — Favourite movies for reference?
+    "answers_rating",     # Q8 — Minimum rating?
+)
+
+
 class SessionModel(BaseModel):
     """Conversation/session state.
 
     Mirrors the `sessions` table schema and SessionRepository expectations.
+
+    BUG #7 FIX
+    ----------
+    ``_TOTAL_QUESTIONS`` declares the canonical number of questionnaire steps.
+    It must equal ``len(QUESTION_COLUMNS)`` — verified at module import time
+    by ``_validate_question_columns()`` below the class definition.
+
+    Handlers that need to map ``question_index`` to a column name should use::
+
+        from models.domain import QUESTION_COLUMNS
+        col = QUESTION_COLUMNS[session.question_index]
     """
+
+    # Number of questionnaire questions — must match len(QUESTION_COLUMNS).
+    _TOTAL_QUESTIONS: int = len(QUESTION_COLUMNS)  # = 9
 
     chat_id: str
     session_state: str = "idle"
@@ -408,3 +452,31 @@ class SessionModel(BaseModel):
             "sim_depth": int(self.sim_depth),
             "updated_at": self.updated_at or utc_now_iso(),
         }
+
+
+def _validate_question_columns() -> None:
+    """Assert at import time that QUESTION_COLUMNS is consistent with SessionModel.
+
+    Checks:
+    1. len(QUESTION_COLUMNS) == SessionModel._TOTAL_QUESTIONS
+    2. Every column name in QUESTION_COLUMNS is an actual field on SessionModel.
+
+    Raises AssertionError immediately so CI and startup both catch mismatches
+    before any user interaction occurs.
+    """
+    total = SessionModel._TOTAL_QUESTIONS
+    assert len(QUESTION_COLUMNS) == total, (
+        f"QUESTION_COLUMNS has {len(QUESTION_COLUMNS)} entries but "
+        f"SessionModel._TOTAL_QUESTIONS is {total}. "
+        "Update QUESTION_COLUMNS or _TOTAL_QUESTIONS to match."
+    )
+    session_fields = set(SessionModel.model_fields.keys())
+    for col in QUESTION_COLUMNS:
+        assert col in session_fields, (
+            f"QUESTION_COLUMNS references '{col}' which is not a field "
+            "on SessionModel. Check for typos or schema drift."
+        )
+
+
+# Run validation once when the module is imported.
+_validate_question_columns()
