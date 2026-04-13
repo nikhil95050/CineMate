@@ -19,13 +19,12 @@ Safety guarantees
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from typing import Optional
 
 logger = logging.getLogger("semantic_service")
 
-# ── Constants ──────────────────────────────────────────────────────────────
+# ── Constants ─────────────────────────────────────────────────────
 VALID_INTENTS = frozenset({
     "start", "trending", "surprise", "watchlist",
     "history", "search", "movie_search", "help",
@@ -33,6 +32,10 @@ VALID_INTENTS = frozenset({
 CACHE_TTL    = 3_600   # 1 hour
 MIN_TEXT_LEN = 5       # ignore tiny / empty strings
 CACHE_PREFIX = "semantic:"
+
+# Model fallback chain: primary first, cheaper fallback second.
+# sonar-pro gives higher accuracy; sonar is always available as a safety net.
+_LLM_MODELS = ("sonar-pro", "sonar")
 
 _SYSTEM_PROMPT = """\
 You are an intent classifier for a Telegram movie-recommendation bot called CineMate.
@@ -64,7 +67,7 @@ class SemanticService:
         """health_service is optional; pass it to gate calls when Perplexity is down."""
         self._health = health_service
 
-    # ── Public API ─────────────────────────────────────────────────────────────────
+    # ── Public API ───────────────────────────────────────────────────────
 
     async def classify_intent(self, text: str) -> str:
         """Return a valid intent string, or 'unknown' on any error / short text."""
@@ -84,7 +87,7 @@ class SemanticService:
             logger.warning("[Semantic] Perplexity unhealthy – returning unknown")
             return "unknown"
 
-        # 3. LLM call – guard against exceptions raised by the real impl OR mocks
+        # 3. LLM call with model fallback chain
         try:
             result = await self._call_llm(text)
         except Exception as exc:  # noqa: BLE001
@@ -101,29 +104,45 @@ class SemanticService:
         logger.info("[Semantic] classified %r → %s", text[:60], result)
         return result
 
-    # ── LLM call ────────────────────────────────────────────────────────────────────
+    # ── LLM call with fallback chain ─────────────────────────────────────────
 
     async def _call_llm(self, text: str) -> Optional[str]:
-        """Call Perplexity (sonar-pro) to classify intent. Returns raw string or None."""
-        try:
-            from clients import perplexity_client
-            messages = [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user",   "content": text[:500]},
-            ]
-            # Use sonar-pro for higher classification accuracy; low tokens needed
-            reply = await perplexity_client.chat(
-                messages=messages,
-                model="sonar-pro",
-                temperature=0.0,
-                max_tokens=20,
-            )
-            return reply
-        except Exception as exc:
-            logger.error("[Semantic] LLM call failed: %s", exc)
-            return None
+        """Try each model in _LLM_MODELS in order; return first successful reply.
 
-    # ── Cache helpers ────────────────────────────────────────────────────────────────
+        Model chain: sonar-pro (primary) → sonar (fallback).
+        Each failure is logged.  Returns None only when all models are exhausted.
+        """
+        from clients import perplexity_client  # local import to allow easy mocking
+
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user",   "content": text[:500]},
+        ]
+
+        last_exc: Optional[Exception] = None
+        for model in _LLM_MODELS:
+            try:
+                reply = await perplexity_client.chat(
+                    messages=messages,
+                    model=model,
+                    temperature=0.0,
+                    max_tokens=20,
+                )
+                if reply:
+                    if model != _LLM_MODELS[0]:
+                        logger.warning(
+                            "[Semantic] primary model %s failed; succeeded with %s",
+                            _LLM_MODELS[0], model,
+                        )
+                    return reply
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Semantic] model %s failed: %s", model, exc)
+                last_exc = exc
+
+        logger.error("[Semantic] all models in fallback chain exhausted; last error: %s", last_exc)
+        return None
+
+    # ── Cache helpers ────────────────────────────────────────────────────────
 
     @staticmethod
     def _make_cache_key(text: str) -> str:
