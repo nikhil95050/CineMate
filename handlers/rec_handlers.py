@@ -66,8 +66,12 @@ async def handle_questioning(
             else:
                 selected.append(choice)
             session_model.answers_genre = ",".join(selected)
+            # Persist the genre toggle BEFORE sending the updated question UI.
             _container.session_service.upsert_session(session_model)
-            await _send_current_question(chat_id, session_model.to_row())
+            # Re-fetch the live session so _send_current_question sees the
+            # already-persisted state and doesn't overwrite it with a stale row.
+            live = _container.session_service.get_session(str(chat_id))
+            await _send_current_question(chat_id, live.to_row())
         else:
             await _move_next(chat_id, session_model, idx, current_key, choice)
 
@@ -81,7 +85,11 @@ async def handle_questioning(
 async def _send_current_question(chat_id: Any, session_row: Dict[str, Any]) -> None:
     import services.container as _container
 
-    session_model = SessionModel.from_row(session_row)
+    # Always work from the live persisted session so that any upserts made
+    # by _move_next (or the genre toggle) are visible here.
+    chat_id_str = str(chat_id)
+    session_model = _container.session_service.get_session(chat_id_str)
+
     idx = int(getattr(session_model, "question_index", 0))
     if idx >= len(QUESTIONS):
         await _finalize(chat_id, session_model)
@@ -112,6 +120,8 @@ async def _move_next(
 
     setattr(session_model, f"answers_{key}", value)
     session_model.question_index = current_idx + 1
+    # Persist the advanced index BEFORE doing anything else so that
+    # _send_current_question (which re-fetches the live session) sees it.
     _container.session_service.upsert_session(session_model)
 
     if session_model.question_index < len(QUESTIONS):
