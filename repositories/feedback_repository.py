@@ -148,3 +148,30 @@ class FeedbackRepository:
 
         row = self._store.get(chat_id, {}).get(movie_id)
         return row.get("reaction_type") if row else None
+    def upsert_feedback(
+        self,
+        chat_id: str,
+        movie_id: str,
+        reaction_type: ReactionType,
+    ) -> None:
+        """Alias for log_reaction — used by tests and external callers."""
+        self.log_reaction(chat_id, movie_id, reaction_type)
+
+
+
+    def get_feedback(self, chat_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return all feedback rows (likes + dislikes) for this user."""
+        chat_id = str(chat_id)
+        if sb.is_configured():
+            try:
+                rows, error = sb.select_rows(
+                    TABLE,
+                    filters={"chat_id": chat_id},
+                    order="timestamp.desc",
+                    limit=limit,
+                )
+                if not error and rows is not None:
+                    return rows
+            except Exception as exc:
+                logger.warning("[FeedbackRepo] get_feedback failed: %s", exc)
+        return list(self._store.get(chat_id, {}).values())[:limit]

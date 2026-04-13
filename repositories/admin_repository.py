@@ -14,6 +14,13 @@ _config_store: Dict[str, str] = {}
 _stats_store: Dict[str, int] = {}
 
 
+def clear_test_stores() -> None:
+    """Clear in-memory fallback stores (for test isolation)."""
+    _admin_store.clear()
+    _config_store.clear()
+    _stats_store.clear()
+
+
 class AdminRepository:
     # ------------------------------------------------------------------
     # Access control

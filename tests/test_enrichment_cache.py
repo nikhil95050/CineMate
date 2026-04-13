@@ -329,7 +329,7 @@ class TestEnrichOneCacheIntegration:
         mock_ensure.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_non_imdb_id_skips_watchmode_and_cache(self):
+    async def test_non_movie_id_skips_watchmode_and_cache(self):
         """NEGATIVE: movie_id not starting with 'tt' → Watchmode and cache never called."""
         repo = make_repo()
         svc = EnrichmentService(metadata_repo=repo)

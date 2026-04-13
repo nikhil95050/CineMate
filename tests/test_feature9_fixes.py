@@ -45,7 +45,7 @@ class TestBroadcastHardImport:
         with patch("handlers.admin.broadcast_handlers.send_message_with_keyboard", new_callable=AsyncMock) as mock_smk, \
              patch("handlers.admin.broadcast_handlers.send_message", new_callable=AsyncMock) as mock_sm, \
              patch("handlers.admin.broadcast_handlers._store_pending"), \
-             patch("handlers.admin.decorator.admin_repo") as mock_ar:
+             patch("services.container.admin_repo") as mock_ar:
 
             mock_ar.is_admin.return_value = True
 
@@ -93,12 +93,12 @@ class TestSafeFormatValue:
     async def test_handle_admin_stats_does_not_raise_on_string_value(self):
         """handle_admin_stats must not raise ValueError when a stat value is a string."""
         with patch("handlers.admin.admin_handlers.send_message", new_callable=AsyncMock) as mock_sm, \
-             patch("handlers.admin.decorator.admin_repo") as mock_ar:
+             patch("services.container.admin_repo") as mock_ar:
 
             mock_ar.is_admin.return_value = True
 
             from services.container import admin_service as real_svc
-            with patch("handlers.admin.admin_handlers.admin_service", create=True) as mock_svc:
+            with patch("services.container.admin_service") as mock_svc:
                 # Mix of int and string values — the old {value:,} would crash on "pending"
                 mock_svc.get_stats.return_value = {
                     "total_users": 1500,
@@ -128,11 +128,11 @@ class TestUsageReportDefensiveAccess:
     async def test_missing_provider_keys_do_not_raise(self):
         """Provider rows with missing calls/tokens/cost must not raise KeyError."""
         with patch("handlers.admin.admin_handlers.send_message", new_callable=AsyncMock) as mock_sm, \
-             patch("handlers.admin.decorator.admin_repo") as mock_ar:
+             patch("services.container.admin_repo") as mock_ar:
 
             mock_ar.is_admin.return_value = True
 
-            with patch("handlers.admin.admin_handlers.admin_service", create=True) as mock_svc:
+            with patch("services.container.admin_service") as mock_svc:
                 # Intentionally missing 'calls', 'total_tokens', 'estimated_cost_usd'
                 mock_svc.get_usage_report.return_value = {
                     "providers": [{"provider": "openai"}],
@@ -151,11 +151,11 @@ class TestUsageReportDefensiveAccess:
     async def test_missing_user_keys_do_not_raise(self):
         """User rows with missing chat_id/interactions must not raise KeyError."""
         with patch("handlers.admin.admin_handlers.send_message", new_callable=AsyncMock) as mock_sm, \
-             patch("handlers.admin.decorator.admin_repo") as mock_ar:
+             patch("services.container.admin_repo") as mock_ar:
 
             mock_ar.is_admin.return_value = True
 
-            with patch("handlers.admin.admin_handlers.admin_service", create=True) as mock_svc:
+            with patch("services.container.admin_service") as mock_svc:
                 mock_svc.get_usage_report.return_value = {
                     "providers": [],
                     "total_estimated_cost_usd": 1.23,
@@ -172,11 +172,11 @@ class TestUsageReportDefensiveAccess:
     async def test_string_cost_does_not_raise(self):
         """estimated_cost_usd returned as string must not crash the formatter."""
         with patch("handlers.admin.admin_handlers.send_message", new_callable=AsyncMock), \
-             patch("handlers.admin.decorator.admin_repo") as mock_ar:
+             patch("services.container.admin_repo") as mock_ar:
 
             mock_ar.is_admin.return_value = True
 
-            with patch("handlers.admin.admin_handlers.admin_service", create=True) as mock_svc:
+            with patch("services.container.admin_service") as mock_svc:
                 mock_svc.get_usage_report.return_value = {
                     "providers": [{"provider": "openai", "estimated_cost_usd": "N/A"}],
                     "total_estimated_cost_usd": "N/A",
@@ -191,11 +191,11 @@ class TestUsageReportDefensiveAccess:
     async def test_full_report_renders_correctly(self):
         """A complete well-formed report must render all expected fields."""
         with patch("handlers.admin.admin_handlers.send_message", new_callable=AsyncMock) as mock_sm, \
-             patch("handlers.admin.decorator.admin_repo") as mock_ar:
+             patch("services.container.admin_repo") as mock_ar:
 
             mock_ar.is_admin.return_value = True
 
-            with patch("handlers.admin.admin_handlers.admin_service", create=True) as mock_svc:
+            with patch("services.container.admin_service") as mock_svc:
                 mock_svc.get_usage_report.return_value = {
                     "providers": [{
                         "provider": "openai",

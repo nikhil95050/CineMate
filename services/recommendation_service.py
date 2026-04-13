@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from models.domain import MovieModel, SessionModel, UserModel
 from services.discovery_service import DiscoveryService
-from services.enrichment_service import EnrichmentService
+from services.enrichment_service import EnrichmentService, enrich_movies
 from services.logging_service import get_logger, error_batcher  # noqa: F401 — imported so tests can patch it here
 
 logger = get_logger("rec_service")

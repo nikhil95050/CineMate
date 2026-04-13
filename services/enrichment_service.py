@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import urllib.parse
+import weakref
 from typing import List, Optional
 
 from clients import watchmode_client
@@ -28,6 +29,7 @@ _YOUTUBE_SEARCH = "https://www.youtube.com/results?search_query="
 
 # Module-level singleton -- shared with discovery_service.
 _metadata_repo = MovieMetadataRepository()
+_background_tasks: weakref.WeakSet = weakref.WeakSet()
 
 
 def _trailer_search_url(movie: MovieModel) -> str:
@@ -127,9 +129,12 @@ class EnrichmentService:
                     updates["streaming"] = summary
                     # --- Write-through cache: persist raw sources to movie_metadata ---
                     # Fire-and-forget so it never delays the user response.
-                    asyncio.ensure_future(
+                    # We hold a reference in _background_tasks to prevent GC.
+                    task = asyncio.create_task(
                         self._persist_streaming(movie.movie_id, sources)
                     )
+                    _background_tasks.add(task)
+                    task.add_done_callback(_background_tasks.discard)
                 else:
                     # Watchmode returned nothing -- try the cache before giving up
                     cached = await self._get_streaming_from_cache(movie.movie_id)

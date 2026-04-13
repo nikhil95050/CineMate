@@ -60,7 +60,7 @@ def _make_user(**kwargs) -> Dict[str, Any]:
 
 def _run(coro):
     """Helper to run async functions in sync test context."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ============================================================
@@ -631,12 +631,12 @@ class TestHistoryAndWatchlist:
         repo = HistoryRepository()
         svc = HistoryService(history_repo=repo)
         movie = MovieModel(
-            title="Test Movie", year="2024", imdb_id="tt_test_01",
+            title="Test Movie", year="2024", movie_id="tt_test_01",
             rating=8.0, genres="Drama", reason="Test reason", streaming="Netflix",
         )
         svc.add_to_history(CHAT_ID, movie)
         history = svc.get_history(CHAT_ID)
-        assert any(m.get("imdb_id") == "tt_test_01" for m in history)
+        assert any(m.get("movie_id") == "tt_test_01" for m in history)
 
     def test_watchlist_in_memory_add_and_get(self):
         from services.movie_service import WatchlistService
@@ -645,12 +645,12 @@ class TestHistoryAndWatchlist:
         repo = WatchlistRepository()
         svc = WatchlistService(watchlist_repo=repo)
         movie = MovieModel(
-            title="Watchlist Movie", year="2023", imdb_id="tt_wl_01",
+            title="Watchlist Movie", year="2023",movie_id="tt_wl_01",
             rating=7.5, genres="Action", reason="Looks great", streaming="Prime",
         )
         svc.add_to_watchlist(CHAT_ID, movie)
         wl = svc.get_watchlist(CHAT_ID)
-        assert any(m.get("imdb_id") == "tt_wl_01" for m in wl)
+        assert any(m.get("movie_id") == "tt_wl_01" for m in wl)
 
     def test_history_pagination_intent(self):
         from handlers.normalizer import detect_intent
@@ -699,7 +699,7 @@ class TestFeedbackAndTasteProfile:
         repo = FeedbackRepository()
         repo.upsert_feedback(CHAT_ID, "tt_test_fb", "like")
         results = repo.get_feedback(CHAT_ID)
-        assert any(r.get("imdb_id") == "tt_test_fb" for r in results)
+        assert any(r.get("movie_id") == "tt_test_fb" for r in results)
 
     def test_min_rating_intent_detected(self):
         from handlers.normalizer import detect_intent
@@ -717,9 +717,9 @@ class TestStarAndShare:
         sent = {}
         async def fake_send_message(chat_id, text, **kwargs):
             sent["text"] = text
-        import clients.telegram_helpers as tg
-        monkeypatch.setattr(tg, "send_message", fake_send_message)
-        monkeypatch.setattr(tg, "show_typing", AsyncMock())
+        import handlers.discovery_handlers as dh
+        monkeypatch.setattr(dh, "send_message", fake_send_message)
+        monkeypatch.setattr(dh, "show_typing", AsyncMock())
         from handlers.discovery_handlers import handle_star
         _run(handle_star(chat_id=CHAT_ID, input_text="/star", session=_make_session(), user=_make_user()))
         assert "/star" in sent.get("text", "") or "Star Filmography" in sent.get("text", "")
@@ -727,13 +727,12 @@ class TestStarAndShare:
     def test_star_with_name_calls_discovery_and_history(self, monkeypatch):
         from models.domain import MovieModel
         fake_movies = [MovieModel(
-            title="Inception", year="2010", imdb_id="tt1375666",
+            title="Inception", year="2010", movie_id="tt1375666",
             rating=8.8, genres="Sci-Fi", reason="Best Nolan", streaming="Netflix"
         )]
-        import clients.telegram_helpers as tg
-        monkeypatch.setattr(tg, "send_message", AsyncMock())
-        monkeypatch.setattr(tg, "show_typing", AsyncMock())
-        monkeypatch.setattr("clients.telegram_card.send_movies_async", AsyncMock())
+        monkeypatch.setattr("handlers.discovery_handlers.send_message", AsyncMock())
+        monkeypatch.setattr("handlers.discovery_handlers.show_typing", AsyncMock())
+        monkeypatch.setattr("handlers.discovery_handlers.send_movies_async", AsyncMock())
         from services.container import discovery_service, history_service
         monkeypatch.setattr(discovery_service, "get_star_movies", AsyncMock(return_value=fake_movies))
         monkeypatch.setattr(history_service, "add_to_history", MagicMock())
@@ -745,9 +744,8 @@ class TestStarAndShare:
         sent_texts = []
         async def fake_send_message(chat_id, text, **kwargs):
             sent_texts.append(text)
-        import clients.telegram_helpers as tg
-        monkeypatch.setattr(tg, "send_message", fake_send_message)
-        monkeypatch.setattr(tg, "show_typing", AsyncMock())
+        monkeypatch.setattr("handlers.discovery_handlers.send_message", fake_send_message)
+        monkeypatch.setattr("handlers.discovery_handlers.show_typing", AsyncMock())
         from services.container import discovery_service
         monkeypatch.setattr(discovery_service, "get_star_movies", AsyncMock(return_value=[]))
         from handlers.discovery_handlers import handle_star
@@ -758,9 +756,8 @@ class TestStarAndShare:
         sent_texts = []
         async def fake_send_message(chat_id, text, **kwargs):
             sent_texts.append(text)
-        import clients.telegram_helpers as tg
-        monkeypatch.setattr(tg, "send_message", fake_send_message)
-        monkeypatch.setattr(tg, "show_typing", AsyncMock())
+        monkeypatch.setattr("handlers.discovery_handlers.send_message", fake_send_message)
+        monkeypatch.setattr("handlers.discovery_handlers.show_typing", AsyncMock())
         from services.container import discovery_service
         monkeypatch.setattr(discovery_service, "get_star_movies", AsyncMock(side_effect=RuntimeError("API exploded")))
         from handlers.discovery_handlers import handle_star
@@ -771,8 +768,7 @@ class TestStarAndShare:
         sent_texts = []
         async def fake_send_message(chat_id, text, **kwargs):
             sent_texts.append(text)
-        import clients.telegram_helpers as tg
-        monkeypatch.setattr(tg, "send_message", fake_send_message)
+        monkeypatch.setattr("handlers.discovery_handlers.send_message", fake_send_message)
         from services.container import session_service
         from models.domain import SessionModel
         monkeypatch.setattr(session_service, "get_session", MagicMock(return_value=SessionModel(chat_id=CHAT_ID, last_recs_json="[]")))
@@ -784,8 +780,7 @@ class TestStarAndShare:
         sent_texts = []
         async def fake_send_message(chat_id, text, **kwargs):
             sent_texts.append(text)
-        import clients.telegram_helpers as tg
-        monkeypatch.setattr(tg, "send_message", fake_send_message)
+        monkeypatch.setattr("handlers.discovery_handlers.send_message", fake_send_message)
         recs = [{"title": "Inception", "year": "2010", "rating": 8.8,
                  "genres": "Sci-Fi", "reason": "Classic", "streaming": "Netflix"}]
         from services.container import session_service
@@ -815,8 +810,7 @@ class TestStarAndShare:
         sent_texts = []
         async def fake_send_message(chat_id, text, **kwargs):
             sent_texts.append(text)
-        import clients.telegram_helpers as tg
-        monkeypatch.setattr(tg, "send_message", fake_send_message)
+        monkeypatch.setattr("handlers.discovery_handlers.send_message", fake_send_message)
         from services.container import session_service
         from models.domain import SessionModel
         monkeypatch.setattr(session_service, "get_session", MagicMock(
@@ -835,6 +829,10 @@ class TestProviderHealth:
     def _repo(self):
         from repositories.admin_repository import AdminRepository
         return AdminRepository()
+
+    def setup_method(self):
+        from repositories.admin_repository import clear_test_stores
+        clear_test_stores()
 
     def test_healthy_provider_closed(self):
         from services.health_service import HealthService
@@ -900,6 +898,10 @@ class TestProviderHealth:
 
 class TestSemanticService:
 
+    def setup_method(self):
+        from config.redis_cache import clear_local_cache
+        clear_local_cache()
+
     def test_unknown_for_short_text(self):
         from services.semantic_service import SemanticService
         assert _run(SemanticService().classify_intent("hi")) == "unknown"
@@ -916,9 +918,21 @@ class TestSemanticService:
     def test_caches_result(self, monkeypatch):
         from services.semantic_service import SemanticService
         n = {"count": 0}
+        cache = {}
+
+        def fake_get_json(key):
+            return cache.get(key)
+
+        def fake_set_json(key, val, ttl=None):
+            cache[key] = val
+
+        monkeypatch.setattr("config.redis_cache.get_json", fake_get_json)
+        monkeypatch.setattr("config.redis_cache.set_json", fake_set_json)
+
         async def fake_llm(self_inner, text):
             n["count"] += 1
             return "trending"
+
         monkeypatch.setattr(SemanticService, "_call_llm", fake_llm)
         svc = SemanticService()
         text = "what is popular at cinemas right now x7z"
@@ -1092,7 +1106,7 @@ class TestReliability:
         repo = HistoryRepository()
         svc = HistoryService(history_repo=repo)
         movie = MovieModel(
-            title="No-DB Movie", year="2022", imdb_id="tt_nodb_01",
+            title="No-DB Movie", year="2022", movie_id="tt_nodb_01",
             rating=6.5, genres="Horror", reason="Scary good", streaming="Hulu",
         )
         svc.add_to_history(CHAT_ID, movie)
@@ -1105,7 +1119,7 @@ class TestReliability:
         repo = WatchlistRepository()
         svc = WatchlistService(watchlist_repo=repo)
         movie = MovieModel(
-            title="No-DB Watchlist", year="2021", imdb_id="tt_nodb_wl_01",
+            title="No-DB Watchlist", year="2021", movie_id="tt_nodb_wl_01",
             rating=7.0, genres="Comedy", reason="Fun", streaming="Disney+",
         )
         svc.add_to_watchlist(CHAT_ID, movie)

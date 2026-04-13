@@ -87,16 +87,13 @@ class MovieService:
 
     def get_movie_from_history(
         self, chat_id: str, movie_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """Return the raw history row dict for the given movie_id, or None.
-
-        Returns a plain dict so handlers can call .get() directly and tests
-        can compare with _history_row() fixtures without model conversion.
-        """
+    ) -> Optional[MovieModel]:
+        """Return the MovieModel for the given movie_id, or None."""
         if not self.history_repo:
             return None
         try:
-            return self.history_repo.get_by_movie_id(chat_id, movie_id)
+            row = self.history_repo.get_by_movie_id(chat_id, movie_id)
+            return MovieModel.from_history_row(row) if row else None
         except Exception as exc:
             logger.warning(
                 "[MovieService] get_movie_from_history failed: %s", exc
@@ -156,19 +153,16 @@ class MovieService:
 
     def get_random_watchlist_reminder(
         self, chat_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """Return a random watchlist row dict, or None if the list is empty.
-
-        Returns a plain dict so callers can use .get() directly and tests
-        can compare with raw row fixtures without model conversion.
-        """
+    ) -> Optional[MovieModel]:
+        """Return a random watchlist MovieModel, or None if the list is empty."""
         if not self.watchlist_repo:
             return None
         try:
             rows = self.watchlist_repo.get_watchlist(chat_id, page=1) or []
             if not rows:
                 return None
-            return random.choice(rows)
+            row = random.choice(rows)
+            return MovieModel.from_history_row(row)  # reusing generic row mapper
         except Exception as exc:
             logger.warning(
                 "[MovieService] get_random_watchlist_reminder failed: %s", exc
@@ -186,15 +180,13 @@ class WatchlistService:
     def __init__(self, watchlist_repo: Any | None = None) -> None:
         self._svc = MovieService(watchlist_repo=watchlist_repo)
 
-    async def get_watchlist(
-        self, chat_id: str, page: int = 1
-    ) -> List[Dict[str, Any]]:
+    def add_to_watchlist(self, chat_id: str, movie: MovieModel) -> bool:
+        return self._svc.add_to_watchlist(chat_id, movie)
+
+    def get_watchlist(self, chat_id: str, page: int = 1) -> List[Dict[str, Any]]:
         return self._svc.get_watchlist(chat_id, page=page)
 
-    async def add(
-        self, chat_id: str, movie: MovieModel
-    ) -> None:
-        """Accept a MovieModel directly — consistent with the service layer."""
+    async def add(self, chat_id: str, movie: MovieModel) -> None:
         self._svc.add_to_watchlist(chat_id, movie)
 
 
@@ -204,15 +196,13 @@ class HistoryService:
     def __init__(self, history_repo: Any | None = None) -> None:
         self._svc = MovieService(history_repo=history_repo)
 
-    async def get_history(
-        self, chat_id: str, page: int = 1
-    ) -> List[Dict[str, Any]]:
+    def add_to_history(self, chat_id: str, movie: MovieModel) -> None:
+        self._svc.add_to_history(chat_id, [movie])
+
+    def get_history(self, chat_id: str, page: int = 1) -> List[Dict[str, Any]]:
         return self._svc.get_history(chat_id, page=page)
 
-    async def add(
-        self, chat_id: str, movies: List[MovieModel]
-    ) -> None:
-        """Accept a list of MovieModel objects — consistent with the service layer."""
+    async def add(self, chat_id: str, movies: List[MovieModel]) -> None:
         self._svc.add_to_history(chat_id, movies)
 
 

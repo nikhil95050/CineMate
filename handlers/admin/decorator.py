@@ -7,26 +7,23 @@ from typing import Any, Callable
 
 logger = logging.getLogger("admin_decorator")
 
+# admin_repo is fetched dynamically inside admin_only to support test patching.
+
 
 def admin_only(func: Callable) -> Callable:
-    """Wrap an async handler so it silently no-ops for non-admins.
-
-    Checks AdminRepository.is_admin(chat_id) -- never raises, never leaks
-    internal errors to the caller.
-    """
+    """Wrap an async handler so it silently no-ops for non-admins."""
     @functools.wraps(func)
     async def wrapper(*args, chat_id: Any = None, **kwargs):
         chat_id_str = str(chat_id) if chat_id is not None else ""
         try:
-            from services.container import admin_repo as _ar
-            if not _ar.is_admin(chat_id_str):
+            from services.container import admin_repo
+            if not admin_repo or not admin_repo.is_admin(chat_id_str):
                 logger.debug(
                     "[admin_only] blocked non-admin %s from %s",
                     chat_id_str, func.__name__,
                 )
-                return  # silent no-op
+                return
         except Exception as exc:
-            # Safety net: any repo failure -> deny access
             logger.warning(
                 "[admin_only] access-check exception for %s in %s: %s",
                 chat_id_str, func.__name__, exc,
