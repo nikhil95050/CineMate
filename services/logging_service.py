@@ -4,7 +4,7 @@ import threading
 import time
 import json
 from contextlib import contextmanager
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pythonjsonlogger import jsonlogger
 from contextvars import ContextVar
 
@@ -46,50 +46,105 @@ def get_logger(name: str) -> logging.Logger:
 
 
 class BatchLogger:
-    """Manages a queue of log items and flushes them in batches to Supabase."""
+    """Manages a queue of log items and flushes them in batches to Supabase.
+
+    Thread-safety notes
+    -------------------
+    * ``self._lock`` guards ``_queue`` and ``_timer`` only.
+    * All Supabase I/O is performed *outside* the lock so that a slow network
+      call never blocks ``emit()`` on another thread.
+    * ``_drain()`` must be called while the lock is already held; it returns
+      the batch to flush and clears the queue atomically.
+    * This design eliminates the re-entrant deadlock that occurred when
+      ``emit()`` held the lock and then called ``flush()`` which tried to
+      acquire the same lock a second time.
+    """
 
     def __init__(self, table_name: str, batch_size: int = 10, flush_interval: int = 5):
         self.table_name = table_name
         self.batch_size = batch_size
         self.flush_interval = flush_interval
-        self._queue = []
+        self._queue: List[dict] = []
         self._lock = threading.Lock()
         self._timer: Optional[threading.Timer] = None
         self._shutdown = False
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _drain(self) -> List[dict]:
+        """Cancel pending timer, drain the queue, and return the batch.
+
+        MUST be called while ``self._lock`` is held.
+        """
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        batch = list(self._queue)
+        self._queue.clear()
+        return batch
+
+    def _schedule_timer(self) -> None:
+        """Start a background timer if one is not already running.
+
+        MUST be called while ``self._lock`` is held.
+        """
+        if self._timer is None:
+            t = threading.Timer(self.flush_interval, self._flush_from_timer)
+            t.daemon = True
+            t.name = f"BatchLogger-{self.table_name}-flush"
+            t.start()
+            self._timer = t
+
+    def _flush_from_timer(self) -> None:
+        """Called by the background timer — clears the timer ref then flushes."""
+        with self._lock:
+            self._timer = None  # timer has already fired; clear reference
+            batch = self._drain()
+        self._send(batch)
+
+    def _send(self, batch: List[dict]) -> None:
+        """Perform the actual Supabase insert. Called outside the lock."""
+        if not batch:
+            return
+        try:
+            if is_supabase_configured():
+                _res, err = insert_rows(self.table_name, batch)
+                if err:
+                    _logger.error(
+                        "[BatchLogger] Supabase error flushing %d items to %s: %s",
+                        len(batch), self.table_name, err,
+                    )
+        except Exception as exc:
+            _logger.error(
+                "[BatchLogger] Exception flushing %d items to %s: %s",
+                len(batch), self.table_name, exc,
+            )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def emit(self, item: dict) -> None:
         if self._shutdown:
             return
+        batch_to_send: List[dict] = []
         with self._lock:
             self._queue.append(item)
             if len(self._queue) >= self.batch_size:
-                self.flush()
-            elif self._timer is None:
-                self._timer = threading.Timer(self.flush_interval, self.flush)
-                self._timer.daemon = True
-                self._timer.start()
+                # Drain under the lock, send outside — no re-entrant lock.
+                batch_to_send = self._drain()
+            else:
+                self._schedule_timer()
+        # I/O outside the lock — safe for concurrent emit() calls.
+        self._send(batch_to_send)
 
     def flush(self) -> None:
+        """Drain the queue and send synchronously. Safe to call at any time."""
         with self._lock:
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
-            if not self._queue:
-                return
-            batch = list(self._queue)
-            self._queue.clear()
-
-        try:
-            if is_supabase_configured():
-                res, err = insert_rows(self.table_name, batch)
-                if err:
-                    _logger.error(
-                        f"[BatchLogger] Supabase error flushing {len(batch)} items to {self.table_name}: {err}"
-                    )
-        except Exception as e:
-            _logger.error(
-                f"[BatchLogger] Exception flushing {len(batch)} items to {self.table_name}: {e}"
-            )
+            batch = self._drain()
+        self._send(batch)
 
     def shutdown(self) -> None:
         self._shutdown = True
