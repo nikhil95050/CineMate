@@ -26,11 +26,18 @@ logger = logging.getLogger("feedback_handlers")
 def _schedule_taste_recompute(chat_id: str) -> None:
     """Fire-and-forget: recompute taste profile without blocking the handler.
 
-    Uses asyncio.get_event_loop().run_in_executor so we never misuse the
-    event loop — the synchronous recompute_taste_profile runs in a thread.
+    Uses asyncio.get_running_loop().run_in_executor so the synchronous
+    recompute_taste_profile runs in a thread-pool without blocking the event
+    loop.  Falls back to a direct synchronous call when there is no running
+    loop (e.g. tests or CLI entry-points).
+
+    asyncio.get_event_loop() is deprecated in Python 3.10+ when called from
+    a coroutine context and raises RuntimeError in Python 3.12+ when there is
+    no current event loop.  get_running_loop() is the correct replacement —
+    it raises RuntimeError when there is no running loop (handled below).
     """
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         loop.run_in_executor(None, user_service.recompute_taste_profile, chat_id)
     except RuntimeError:
         # No running loop (e.g. tests or CLI) — run synchronously inline.
