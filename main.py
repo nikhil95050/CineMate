@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Import modules (not names) so monkeypatch.setattr on the module object
 # intercepts calls even after importlib.reload(main) in tests.
@@ -27,6 +28,62 @@ KEEPALIVE_INTERVAL = 9 * 60  # ping every 9 minutes
 ADMIN_IDS: set[str] = set(
     i.strip() for i in os.environ.get("ADMIN_CHAT_IDS", "").split(",") if i.strip()
 )
+
+# ---------------------------------------------------------------------------
+# Request size limit (Fix: large-request handling)
+# ---------------------------------------------------------------------------
+# Telegram webhook payloads are small JSON objects (a few KB at most).
+# We reject any request body exceeding 1 MB to guard against:
+#   - Accidental or malicious oversized payloads
+#   - Memory pressure / slow-request attacks
+# Telegram will receive HTTP 413 and stop retrying that update, which is the
+# correct behaviour for a permanently-invalid request.
+MAX_REQUEST_BODY_BYTES: int = int(
+    os.environ.get("CINEMATE_MAX_REQUEST_BYTES", str(1 * 1024 * 1024))  # 1 MB default
+)
+
+
+class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+    """Reject requests whose Content-Length exceeds MAX_REQUEST_BODY_BYTES.
+
+    Two-stage check:
+    1. Content-Length header (fast path, no body read required).
+    2. Actual body bytes read (covers chunked-encoding where no header is set).
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        # Fast path: Content-Length header present
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > MAX_REQUEST_BODY_BYTES:
+                    logger.warning(
+                        "Rejected oversized request: Content-Length=%s bytes (limit=%s)",
+                        content_length,
+                        MAX_REQUEST_BODY_BYTES,
+                    )
+                    return JSONResponse(
+                        {"ok": False, "description": "Request body too large"},
+                        status_code=413,
+                    )
+            except ValueError:
+                pass  # Malformed header -- let the handler deal with it
+
+        # Slow path: no Content-Length (chunked transfer encoding)
+        # Read up to limit + 1 bytes to detect oversize without buffering entire body.
+        body = await request.body()
+        if len(body) > MAX_REQUEST_BODY_BYTES:
+            logger.warning(
+                "Rejected oversized request: actual body=%s bytes (limit=%s)",
+                len(body),
+                MAX_REQUEST_BODY_BYTES,
+            )
+            return JSONResponse(
+                {"ok": False, "description": "Request body too large"},
+                status_code=413,
+            )
+
+        return await call_next(request)
 
 
 async def _keepalive_loop():
@@ -53,6 +110,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="CineMate Bot API", lifespan=lifespan)
+
+# Register size-limit middleware AFTER app creation so it wraps all routes.
+app.add_middleware(RequestSizeLimitMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -133,14 +193,10 @@ async def debug_start():
 # ---------------------------------------------------------------------------
 # Webhook
 # ---------------------------------------------------------------------------
-
-@app.get("/webhook/{token}")
-async def webhook_get(token: str):
-    return JSONResponse({
-        "ok": True,
-        "info": "CineMate webhook is active. Telegram sends POST requests here.",
-    })
-
+# NOTE: The GET /webhook/{token} endpoint has been intentionally removed.
+# It was not part of the spec and could confuse Telegram's webhook diagnostics
+# (Telegram only uses POST). A GET to this path now returns 405 Method Not
+# Allowed, which is the correct HTTP response.
 
 @app.post("/webhook/{token}")
 async def telegram_webhook(token: str, request: Request):
@@ -158,7 +214,6 @@ async def telegram_webhook(token: str, request: Request):
         return JSONResponse({"ok": True})
 
     # -- Dedup ---------------------------------------------------------------
-    # Looked up via module object so monkeypatch.setattr(redis_cache, ...) works.
     update_id = normalized.get("update_id")
     if update_id is not None:
         if not _redis_cache.mark_processed_update(str(update_id)):
@@ -171,7 +226,6 @@ async def telegram_webhook(token: str, request: Request):
     sent_at = normalized.get("sent_at")
 
     # -- Rate limiting -------------------------------------------------------
-    # Looked up via module object so monkeypatch.setattr(redis_cache, ...) works.
     user_tier = "admin" if str(chat_id) in ADMIN_IDS else "user"
     if _redis_cache.is_rate_limited(f"chat:{chat_id}", user_tier=user_tier):
         from clients.telegram_helpers import send_message_safely
@@ -202,12 +256,7 @@ async def telegram_webhook(token: str, request: Request):
     intent = detect_intent(input_text, session_row)
     request_id = str(uuid.uuid4())
 
-    # -- Dispatch via services.enqueue_job (P2-1) ----------------------------
-    # Wrapped in try/except so that any RQ/Redis failure is logged and
-    # swallowed -- Telegram requires HTTP 200 from every webhook call or it
-    # will keep retrying the same update indefinitely.
-    # Accessed via module attribute so monkeypatch.setattr('services.enqueue_job')
-    # intercepts the call correctly in tests after reload().
+    # -- Dispatch via services.enqueue_job -----------------------------------
     enqueue_ok = True
     try:
         services.enqueue_job(
