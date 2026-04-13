@@ -124,10 +124,16 @@ async def handle_more_like(
     await show_typing(chat_id)
     await send_message(chat_id, f"\U0001f3af Finding movies like <b>{seed_title}</b>\u2026")
 
+    # Fix #15: exclude all previously-seen titles EXCEPT the seed movie itself.
+    # Including seed_title in the exclusion list told the LLM not to return the
+    # very film we're basing recommendations on, which could reduce the usable
+    # candidate pool to zero when last_recs_raw is small.
     seen_titles: list = []
     try:
         seen_titles = [
-            r.get("title", "") for r in last_recs_raw if r.get("title")
+            r.get("title", "")
+            for r in last_recs_raw
+            if r.get("title") and r.get("title") != seed_title
         ]
     except Exception:
         pass
