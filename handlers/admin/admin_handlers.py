@@ -10,6 +10,21 @@ from handlers.admin.decorator import admin_only
 logger = logging.getLogger("admin_handlers")
 
 
+def _safe_format_value(value: Any) -> str:
+    """Format a stat value safely regardless of its type.
+
+    Supabase and Redis can return integers, floats, or strings for the same
+    metric depending on the query path.  Attempting {value:,} on a string
+    raises ValueError.  This helper formats numerics with comma-separators
+    and falls back to plain str() for all other types.
+    """
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        return f"{value:,.2f}"
+    return str(value)
+
+
 # ---------------------------------------------------------------------------
 # /admin_health
 # ---------------------------------------------------------------------------
@@ -59,7 +74,7 @@ async def handle_admin_stats(
 
     lines = ["\U0001f4ca <b>Bot Statistics</b>\n"]
     for metric, value in sorted(stats.items()):
-        lines.append(f"\u2022 <b>{metric}</b>: {value:,}")
+        lines.append(f"\u2022 <b>{metric}</b>: {_safe_format_value(value)}")
     await send_message(chat_id, "\n".join(lines))
 
 
@@ -166,18 +181,31 @@ async def handle_admin_usage(
 
     lines = [f"\U0001f4c8 <b>API Usage (last {hours}h)</b>\n"]
     for p in report.get("providers", []):
+        provider = p.get("provider", "unknown")
+        calls = p.get("calls", 0)
+        tokens = p.get("total_tokens", 0)
+        cost = p.get("estimated_cost_usd", 0.0)
+        try:
+            cost_str = f"~${float(cost):.4f}"
+        except (ValueError, TypeError):
+            cost_str = f"~${cost}"
         lines.append(
-            f"<b>{p['provider']}</b>: {p['calls']:,} calls | "
-            f"{p['total_tokens']:,} tokens | "
-            f"~${p['estimated_cost_usd']:.4f}"
+            f"<b>{provider}</b>: {_safe_format_value(calls)} calls | "
+            f"{_safe_format_value(tokens)} tokens | {cost_str}"
         )
-    lines.append(
-        f"\n\U0001f4b0 <b>Total estimated cost</b>: "
-        f"~${report['total_estimated_cost_usd']:.4f}"
-    )
+
+    total_cost = report.get("total_estimated_cost_usd", 0.0)
+    try:
+        total_cost_str = f"~${float(total_cost):.4f}"
+    except (ValueError, TypeError):
+        total_cost_str = f"~${total_cost}"
+    lines.append(f"\n\U0001f4b0 <b>Total estimated cost</b>: {total_cost_str}")
+
     lines.append("\n\U0001f465 <b>Top Users</b>")
     for u in report.get("top_users", []):
-        lines.append(f"  \u2022 <code>{u['chat_id']}</code>: {u['interactions']} interactions")
+        uid = u.get("chat_id", "unknown")
+        interactions = u.get("interactions", 0)
+        lines.append(f"  \u2022 <code>{uid}</code>: {_safe_format_value(interactions)} interactions")
 
     await send_message(chat_id, "\n".join(lines))
 

@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
-from clients.telegram_helpers import send_message, send_message_safely
+from clients.telegram_helpers import send_message, send_message_safely, send_message_with_keyboard
 from handlers.admin.decorator import admin_only
 
 logger = logging.getLogger("broadcast_handlers")
@@ -19,7 +20,7 @@ _PENDING_STORE: dict = {}   # only used when Redis is unavailable
 def _store_pending(message: str) -> None:
     try:
         import config.redis_cache as rc
-        client = rc.get_redis()          # <-- corrected
+        client = rc.get_redis()
         if client:
             client.setex(_BROADCAST_KEY, 600, message)   # 10-min TTL
             return
@@ -31,7 +32,7 @@ def _store_pending(message: str) -> None:
 def _pop_pending() -> str | None:
     try:
         import config.redis_cache as rc
-        client = rc.get_redis()          # <-- corrected
+        client = rc.get_redis()
         if client:
             val = client.get(_BROADCAST_KEY)
             client.delete(_BROADCAST_KEY)
@@ -44,7 +45,7 @@ def _pop_pending() -> str | None:
 def _cancel_pending() -> bool:
     try:
         import config.redis_cache as rc
-        client = rc.get_redis()          # <-- corrected
+        client = rc.get_redis()
         if client:
             deleted = client.delete(_BROADCAST_KEY)
             return bool(deleted)
@@ -86,23 +87,12 @@ async def handle_admin_broadcast(
             {"text": "\u274c Cancel",         "callback_data": "admin_broadcast_cancel"},
         ]]
     }
-    import json
-    try:
-        from clients.telegram_helpers import send_message_with_keyboard
-        await send_message_with_keyboard(
-            chat_id,
-            f"\U0001f4e2 <b>Broadcast Preview</b>\n\n{preview}\n\n"
-            f"Send to <b>all users</b>?",
-            reply_markup=json.dumps(keyboard),
-        )
-    except (ImportError, AttributeError):
-        # Fallback if send_message_with_keyboard is not yet implemented
-        await send_message(
-            chat_id,
-            f"\U0001f4e2 <b>Broadcast Preview</b>\n\n{preview}\n\n"
-            f"Reply with <code>admin_broadcast_confirm</code> to send or "
-            f"<code>admin_broadcast_cancel</code> to abort.",
-        )
+    await send_message_with_keyboard(
+        chat_id,
+        f"\U0001f4e2 <b>Broadcast Preview</b>\n\n{preview}\n\n"
+        f"Send to <b>all users</b>?",
+        reply_markup=json.dumps(keyboard),
+    )
 
 
 # ---------------------------------------------------------------------------
