@@ -73,7 +73,7 @@ class StreamingInfo(BaseModel):
         """Build a StreamingInfo from a legacy plain-text streaming string.
 
         Parses comma/semicolon-separated platform names into ``platforms``.
-        Always safe to call — returns an empty StreamingInfo when *raw* is
+        Always safe to call \u2014 returns an empty StreamingInfo when *raw* is
         None or blank.
         """
         if not raw or not raw.strip():
@@ -268,7 +268,7 @@ class UserModel(BaseModel):
     user_taste_vector: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------------
-    # Field validators — coerce Supabase JSONB columns that arrive as
+    # Field validators \u2014 coerce Supabase JSONB columns that arrive as
     # raw JSON strings (e.g. '[]', '["Action"]', '{"genres": [...]}')
     # into proper Python types before Pydantic validates them.
     # ------------------------------------------------------------------
@@ -294,7 +294,7 @@ class UserModel(BaseModel):
         return cls(
             chat_id=str(row.get("chat_id", "")),
             username=row.get("username") or "User",
-            # Pass raw value — _ensure_list validator handles str/list/None
+            # Pass raw value \u2014 _ensure_list validator handles str/list/None
             preferred_genres=row.get("preferred_genres") or [],
             disliked_genres=row.get("disliked_genres") or [],
             preferred_language=row.get("preferred_language") or None,
@@ -306,17 +306,36 @@ class UserModel(BaseModel):
         )
 
     def to_row(self) -> Dict[str, Any]:
+        """Serialise the model to a dict suitable for Supabase REST upsert.
+
+        Fix #10 changes:
+        - updated_at is now included so every write stamps the row timestamp.
+        - JSONB list columns (preferred_genres, disliked_genres, subscriptions)
+          are serialised to JSON strings so Supabase REST accepts them.
+        - user_taste_vector (JSONB dict) is serialised to a JSON string when
+          present; None is sent as None so the column is explicitly written
+          rather than silently omitted.
+        """
         return {
             "chat_id": self.chat_id,
             "username": self.username,
-            "preferred_genres": self.preferred_genres,
-            "disliked_genres": self.disliked_genres,
+            # JSONB list columns \u2014 must be JSON strings for Supabase REST
+            "preferred_genres": json.dumps(self.preferred_genres),
+            "disliked_genres": json.dumps(self.disliked_genres),
             "preferred_language": self.preferred_language,
             "preferred_era": self.preferred_era,
             "watch_context": self.watch_context,
             "avg_rating_preference": self.avg_rating_preference,
-            "subscriptions": self.subscriptions,
-            "user_taste_vector": self.user_taste_vector,
+            # JSONB list column
+            "subscriptions": json.dumps(self.subscriptions),
+            # JSONB dict column \u2014 serialise to string or send None explicitly
+            "user_taste_vector": (
+                json.dumps(self.user_taste_vector)
+                if self.user_taste_vector is not None
+                else None
+            ),
+            # Fix #10: stamp updated_at on every write
+            "updated_at": utc_now_iso(),
         }
 
 
