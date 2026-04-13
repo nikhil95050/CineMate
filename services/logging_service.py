@@ -1,3 +1,8 @@
+"""Logging service.
+
+BUG #2 FIX: Added log_api_usage() static method — writes to api_usage table.
+BUG #10 FIX: BatchLogger._send() retries once before silently dropping rows.
+"""
 import logging
 import sys
 import threading
@@ -11,19 +16,15 @@ from contextvars import ContextVar
 from utils.time_utils import utc_now_iso
 from config.supabase_client import insert_rows, is_configured as is_supabase_configured
 
-# Central context for logging interaction turns (User Input -> Bot Response)
 interaction_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("interaction_context", default=None)
 
 
 class CustomJsonFormatter(jsonlogger.JsonFormatter):
     def add_fields(self, log_record, record, message_dict):
-        super(CustomJsonFormatter, self).add_fields(log_record, record, message_dict)
+        super().add_fields(log_record, record, message_dict)
         if not log_record.get("timestamp"):
             log_record["timestamp"] = utc_now_iso()
-        if log_record.get("level"):
-            log_record["level"] = log_record["level"].upper()
-        else:
-            log_record["level"] = record.levelname
+        log_record["level"] = log_record.get("level", record.levelname).upper()
 
 
 def setup_logging():
@@ -46,18 +47,9 @@ def get_logger(name: str) -> logging.Logger:
 
 
 class BatchLogger:
-    """Manages a queue of log items and flushes them in batches to Supabase.
+    """Thread-safe batched writer to a Supabase table.
 
-    Thread-safety notes
-    -------------------
-    * ``self._lock`` guards ``_queue`` and ``_timer`` only.
-    * All Supabase I/O is performed *outside* the lock so that a slow network
-      call never blocks ``emit()`` on another thread.
-    * ``_drain()`` must be called while the lock is already held; it returns
-      the batch to flush and clears the queue atomically.
-    * This design eliminates the re-entrant deadlock that occurred when
-      ``emit()`` held the lock and then called ``flush()`` which tried to
-      acquire the same lock a second time.
+    BUG #10 FIX: _send() now retries once on failure before giving up.
     """
 
     def __init__(self, table_name: str, batch_size: int = 10, flush_interval: int = 5):
@@ -69,15 +61,7 @@ class BatchLogger:
         self._timer: Optional[threading.Timer] = None
         self._shutdown = False
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _drain(self) -> List[dict]:
-        """Cancel pending timer, drain the queue, and return the batch.
-
-        MUST be called while ``self._lock`` is held.
-        """
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
@@ -86,10 +70,6 @@ class BatchLogger:
         return batch
 
     def _schedule_timer(self) -> None:
-        """Start a background timer if one is not already running.
-
-        MUST be called while ``self._lock`` is held.
-        """
         if self._timer is None:
             t = threading.Timer(self.flush_interval, self._flush_from_timer)
             t.daemon = True
@@ -98,33 +78,38 @@ class BatchLogger:
             self._timer = t
 
     def _flush_from_timer(self) -> None:
-        """Called by the background timer — clears the timer ref then flushes."""
         with self._lock:
-            self._timer = None  # timer has already fired; clear reference
+            self._timer = None
             batch = self._drain()
         self._send(batch)
 
     def _send(self, batch: List[dict]) -> None:
-        """Perform the actual Supabase insert. Called outside the lock."""
+        """Insert batch into Supabase. BUG #10 FIX: one retry on transient failure."""
         if not batch:
             return
-        try:
-            if is_supabase_configured():
+        if not is_supabase_configured():
+            return
+        for attempt in range(2):
+            try:
                 _res, err = insert_rows(self.table_name, batch)
                 if err:
+                    if attempt == 0:
+                        time.sleep(0.5)
+                        continue
                     _logger.error(
                         "[BatchLogger] Supabase error flushing %d items to %s: %s",
                         len(batch), self.table_name, err,
                     )
-        except Exception as exc:
-            _logger.error(
-                "[BatchLogger] Exception flushing %d items to %s: %s",
-                len(batch), self.table_name, exc,
-            )
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+                return
+            except Exception as exc:
+                if attempt == 0:
+                    time.sleep(0.5)
+                    continue
+                _logger.error(
+                    "[BatchLogger] Exception flushing %d items to %s: %s",
+                    len(batch), self.table_name, exc,
+                )
+                return
 
     def emit(self, item: dict) -> None:
         if self._shutdown:
@@ -133,15 +118,12 @@ class BatchLogger:
         with self._lock:
             self._queue.append(item)
             if len(self._queue) >= self.batch_size:
-                # Drain under the lock, send outside — no re-entrant lock.
                 batch_to_send = self._drain()
             else:
                 self._schedule_timer()
-        # I/O outside the lock — safe for concurrent emit() calls.
         self._send(batch_to_send)
 
     def flush(self) -> None:
-        """Drain the queue and send synchronously. Safe to call at any time."""
         with self._lock:
             batch = self._drain()
         self._send(batch)
@@ -156,11 +138,7 @@ error_batcher = BatchLogger("error_logs", batch_size=1, flush_interval=1)
 
 
 class LoggingService:
-    """Service for structured logging, performance profiling, and persistent stats.
-
-    This is a trimmed version of the original Antigravity LoggingService, kept
-    focused on core behavior needed for the baseline.
-    """
+    """Structured logging, performance profiling, and persistent stats."""
 
     @staticmethod
     def log_event(
@@ -175,33 +153,49 @@ class LoggingService:
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         log_data = {
-            "chat_id": chat_id,
-            "intent": intent,
-            "step": step,
-            "provider": provider,
-            "latency_ms": latency_ms,
-            "status": status,
-            "error_type": error_type,
-            **(extra or {}),
+            "chat_id": chat_id, "intent": intent, "step": step,
+            "provider": provider, "latency_ms": latency_ms, "status": status,
+            "error_type": error_type, **(extra or {}),
         }
         if status == "error":
             _logger.error(f"Event {intent}:{step} failed", extra=log_data)
-            error_batcher.emit(
-                {
-                    "chat_id": str(chat_id),
-                    "error_type": error_type or str(intent),
-                    "error_message": f"{step}: {json.dumps(extra or {})}",
-                    "workflow_step": str(step),
-                    "intent": str(intent),
-                    "request_id": request_id,
-                    "raw_payload": json.dumps(extra or {}),
-                    "timestamp": utc_now_iso(),
-                }
-            )
+            error_batcher.emit({
+                "chat_id": str(chat_id),
+                "error_type": error_type or str(intent),
+                "error_message": f"{step}: {json.dumps(extra or {})}",
+                "workflow_step": str(step),
+                "intent": str(intent),
+                "request_id": request_id,
+                "raw_payload": json.dumps(extra or {}),
+                "timestamp": utc_now_iso(),
+            })
         elif isinstance(latency_ms, int) and latency_ms > 2000:
             _logger.warning(f"Event {intent}:{step} was slow", extra=log_data)
         else:
             _logger.info(f"Event {intent}:{step} processed", extra=log_data)
+
+    @staticmethod
+    def log_api_usage(
+        provider: str,
+        action: str,
+        chat_id: str = "system",
+        prompt_tokens: Optional[int] = None,
+        completion_tokens: Optional[int] = None,
+        total_tokens: Optional[int] = None,
+    ) -> None:
+        """BUG #2 FIX — write a row to api_usage after every external provider call."""
+        try:
+            from repositories.api_usage_repository import api_usage_repo
+            api_usage_repo.log(
+                provider=provider,
+                action=action,
+                chat_id=chat_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
+        except Exception as exc:
+            _logger.warning("[LoggingService] log_api_usage failed: %s", exc)
 
     @staticmethod
     @contextmanager
@@ -221,20 +215,16 @@ class LoggingService:
         try:
             result = func(*args, **kwargs)
             return result
-        except Exception as e:  # pragma: no cover - defensive
+        except Exception as e:
             status = "error"
             error_message = str(e)
             raise
         finally:
             latency = int((time.time() - start) * 1000)
             LoggingService.log_event(
-                chat_id=chat_id,
-                intent=intent,
-                step=step,
-                request_id=request_id,
-                provider=provider,
-                latency_ms=latency,
-                status=status,
+                chat_id=chat_id, intent=intent, step=step,
+                request_id=request_id, provider=provider,
+                latency_ms=latency, status=status,
                 extra={"err": error_message} if error_message else None,
             )
 
@@ -250,17 +240,15 @@ class LoggingService:
         username: str = "",
         request_id: str = "N/A",
     ) -> None:
-        interaction_batcher.emit(
-            {
-                "chat_id": str(chat_id),
-                "username": username or "",
-                "input_text": input_text[:1000] if input_text else "",
-                "bot_response": response_text[:2000] if response_text else "",
-                "intent": intent or "unknown",
-                "latency_ms": latency_ms,
-                "request_id": request_id,
-                "user_sent_at": user_sent_at or utc_now_iso(),
-                "bot_replied_at": bot_replied_at or utc_now_iso(),
-                "timestamp": utc_now_iso(),
-            }
-        )
+        interaction_batcher.emit({
+            "chat_id": str(chat_id),
+            "username": username or "",
+            "input_text": input_text[:1000] if input_text else "",
+            "bot_response": response_text[:2000] if response_text else "",  # BUG #8 FIX — now populated
+            "intent": intent or "unknown",
+            "latency_ms": latency_ms,
+            "request_id": request_id,
+            "user_sent_at": user_sent_at or utc_now_iso(),
+            "bot_replied_at": bot_replied_at or utc_now_iso(),
+            "timestamp": utc_now_iso(),
+        })

@@ -1,7 +1,12 @@
-"""AdminRepository: admins table, app_config flags, bot_stats, error_logs, api_usage."""
+"""AdminRepository: admins table, app_config flags, bot_stats, error_logs, api_usage.
+
+BUG #5 FIX: on is_admin(), fall back to ADMIN_CHAT_IDS env var when the DB
+            admins table is empty or unavailable, and seed the table on first use.
+"""
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import config.supabase_client as sb
@@ -13,12 +18,23 @@ _admin_store: set = set()
 _config_store: Dict[str, str] = {}
 _stats_store: Dict[str, int] = {}
 
+# Cache to avoid re-seeding on every call
+_admins_seeded: bool = False
+
+
+def _env_admin_ids() -> List[str]:
+    """Return chat IDs from ADMIN_CHAT_IDS environment variable."""
+    raw = os.getenv("ADMIN_CHAT_IDS", "")
+    return [cid.strip() for cid in raw.split(",") if cid.strip()]
+
 
 def clear_test_stores() -> None:
     """Clear in-memory fallback stores (for test isolation)."""
+    global _admins_seeded
     _admin_store.clear()
     _config_store.clear()
     _stats_store.clear()
+    _admins_seeded = False
 
 
 class AdminRepository:
@@ -26,10 +42,37 @@ class AdminRepository:
     # Access control
     # ------------------------------------------------------------------
 
-    def is_admin(self, chat_id: str) -> bool:
-        """Return True if chat_id is listed in the admins table."""
+    def _seed_admins_if_needed(self) -> None:
+        """BUG #5 FIX: Seed admins table from ADMIN_CHAT_IDS env var once."""
+        global _admins_seeded
+        if _admins_seeded:
+            return
+        env_ids = _env_admin_ids()
+        if not env_ids:
+            _admins_seeded = True
+            return
         if sb.is_configured():
             try:
+                rows = [{"chat_id": cid} for cid in env_ids]
+                sb.upsert_rows("admins", rows, on_conflict="chat_id")
+                _admins_seeded = True
+                logger.info("[AdminRepo] Seeded %d admin(s) into DB from env.", len(rows))
+            except Exception as exc:
+                logger.warning("[AdminRepo] admin seed failed: %s", exc)
+        else:
+            # In-memory fallback
+            _admin_store.update(env_ids)
+            _admins_seeded = True
+
+    def is_admin(self, chat_id: str) -> bool:
+        """Return True if chat_id is listed in the admins table OR env var."""
+        # BUG #5 FIX — always check env var first (fast path, no DB needed)
+        if str(chat_id) in _env_admin_ids():
+            self._seed_admins_if_needed()
+            return True
+        if sb.is_configured():
+            try:
+                self._seed_admins_if_needed()
                 res, err = sb.select_rows(
                     "admins",
                     filters={"chat_id": str(chat_id)},
@@ -141,7 +184,6 @@ class AdminRepository:
                 )
                 if err or not res:
                     return []
-                # Aggregate in Python
                 agg: Dict[str, Dict[str, Any]] = {}
                 for row in res:
                     p = row.get("provider", "unknown")

@@ -9,14 +9,13 @@ from typing import Any, Dict, List, Optional
 from models.domain import MovieModel, SessionModel, UserModel
 from services.discovery_service import DiscoveryService
 from services.enrichment_service import EnrichmentService, enrich_movies
-from services.logging_service import get_logger, error_batcher  # noqa: F401 — imported so tests can patch it here
+from services.logging_service import get_logger, error_batcher  # noqa: F401
 
 logger = get_logger("rec_service")
 
 BATCH_SIZE = 5
 
-# Fix 3: hold strong references to background tasks so Python 3.11+ cannot
-# silently GC-cancel them before the event loop finishes them.
+# Hold strong references so Python 3.11+ cannot GC-cancel background tasks.
 _background_tasks: weakref.WeakSet = weakref.WeakSet()
 
 
@@ -46,7 +45,7 @@ def _movie_passes_filters(
 
 
 class RecommendationService:
-    """Orchestrates discovery, dedup, filtering, enrichment, and session persistence."""
+    """Orchestrates discovery, dedup, filtering, enrichment, and session + history persistence."""
 
     def __init__(self, discovery: Optional[DiscoveryService] = None) -> None:
         self._discovery = discovery or DiscoveryService()
@@ -54,7 +53,7 @@ class RecommendationService:
 
     async def get_recommendations(
         self,
-        session: Optional[SessionModel] = None,  # Fix 2: was `SessionModel = None`
+        session: Optional[SessionModel] = None,
         user: Optional[UserModel] = None,
         mode: str = "question_engine",
         chat_id: str = "",
@@ -62,9 +61,8 @@ class RecommendationService:
         request_id: str = "N/A",
         **kwargs,
     ) -> List[Dict[str, Any]]:
-        """Return up to BATCH_SIZE enriched movie dicts, with overflow buffered in session."""
+        """Return up to BATCH_SIZE enriched movie dicts, persist history, buffer overflow."""
 
-        # Fix 2: guard every session attribute access behind an explicit None check
         last_recs = _parse_json_list(session.last_recs_json) if session is not None else []
         excluded_ids = {str(r.get("movie_id", "")) for r in last_recs if r.get("movie_id")}
         excluded_titles = {str(r.get("title", "")).lower() for r in last_recs if r.get("title")}
@@ -99,12 +97,22 @@ class RecommendationService:
         to_show = deduped[:BATCH_SIZE]
         overflow = deduped[BATCH_SIZE:]
 
+        # Enrich BEFORE writing history so the canonical movie_id (OMDb imdbID) is used
         enriched = await self._enrichment.enrich_movies(
             to_show,
             chat_id=chat_id or "system",
         )
 
-        # Fix 2: guard session access — only touch session_service when session is real
+        # BUG #1 FIX — write history rows after enrichment
+        if chat_id and enriched:
+            try:
+                from services.container import movie_service  # deferred to avoid import cycles
+                history_rows = [m.to_history_row(chat_id) for m in enriched]
+                movie_service.history_repo.log_recommendations(chat_id, history_rows)
+            except Exception as hist_exc:
+                logger.warning("[RecService] history write failed: %s", hist_exc)
+
+        # Persist session state
         if chat_id and session is not None:
             from services.container import session_service  # deferred to avoid import cycles
             session_model = session_service.get_session(chat_id)
@@ -113,8 +121,6 @@ class RecommendationService:
             session_service.upsert_session(session_model)
 
         if overflow:
-            # Fix 3: store task reference in module-level WeakSet to prevent
-            # silent GC-cancellation under Python 3.11+ event-loop teardown.
             task = asyncio.create_task(
                 self._enrichment.enrich_movies(overflow, chat_id=chat_id or "system")
             )
@@ -125,7 +131,7 @@ class RecommendationService:
 
     async def get_more_suggestions(
         self,
-        session: Optional[SessionModel] = None,  # Fix 2: was `SessionModel` without Optional
+        session: Optional[SessionModel] = None,
         user: Optional[UserModel] = None,
         chat_id: str = "",
         request_id: str = "N/A",
@@ -133,7 +139,6 @@ class RecommendationService:
         """Return movies from the overflow buffer; if empty, re-discover."""
         from services.container import session_service  # deferred to avoid import cycles
 
-        # Fix 2: guard against None session
         overflow_raw = session.overflow_buffer_json if session is not None else None
         overflow = _parse_json_list(overflow_raw) if overflow_raw else []
 
@@ -144,6 +149,16 @@ class RecommendationService:
                 [MovieModel(**m) for m in batch],
                 chat_id=chat_id or "system",
             )
+
+            # BUG #1 FIX — also write history for overflow batch
+            if chat_id and enriched:
+                try:
+                    from services.container import movie_service
+                    movie_service.history_repo.log_recommendations(
+                        chat_id, [m.to_history_row(chat_id) for m in enriched]
+                    )
+                except Exception as hist_exc:
+                    logger.warning("[RecService] overflow history write failed: %s", hist_exc)
 
             if chat_id and session is not None:
                 session_model = session_service.get_session(chat_id)

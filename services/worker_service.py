@@ -4,18 +4,30 @@ Fallback path (Feature 10):
   When detect_intent returns 'fallback' AND the user message is long enough,
   SemanticService.classify_intent is called once to attempt smarter routing.
   A _semantic_attempted guard prevents recursion / double-classification.
+
+BUG #3 FIX: increment bot_stats (total_interactions / total_errors) on every intent.
+BUG #8 FIX: capture bot_response_text via contextvars so log_interaction is populated.
 """
 from __future__ import annotations
 
 import time
+from contextvars import ContextVar
 from typing import Any, Dict
 
 from models import SessionModel, UserModel
 from services.logging_service import LoggingService
 from utils.time_utils import utc_now_iso
 
+# BUG #8 FIX — handlers set this context var with their final text response
+_bot_response_ctx: ContextVar[str] = ContextVar("bot_response_text", default="")
+
 # Minimum text length before semantic routing is attempted
 _SEMANTIC_MIN_LEN = 8
+
+
+def set_bot_response(text: str) -> None:
+    """Called by any handler to record the text sent back to the user."""
+    _bot_response_ctx.set(text or "")
 
 
 async def run_intent_job(
@@ -29,7 +41,7 @@ async def run_intent_job(
     callback_query_id: str | None = None,
     message_id: int | None = None,
     user_sent_at: str | None = None,
-    _semantic_attempted: bool = False,   # recursion guard – never set by callers
+    _semantic_attempted: bool = False,
 ) -> None:
     chat_id_str = str(chat_id)
     session_model = SessionModel.from_row({"chat_id": chat_id_str, **(session or {})})
@@ -46,7 +58,8 @@ async def run_intent_job(
     )
 
     t_start = time.time()
-    bot_response_text = ""
+    # BUG #8 FIX — reset context var for this job
+    _bot_response_ctx.set("")
 
     try:
         if intent == "start":
@@ -121,8 +134,6 @@ async def run_intent_job(
             from handlers.discovery_handlers import handle_share
             await handle_share(**kwargs)
 
-        # ── Admin intents ────────────────────────────────────────────────
-
         elif intent == "admin_health":
             from handlers.admin import handle_admin_health
             await handle_admin_health(**kwargs)
@@ -163,20 +174,11 @@ async def run_intent_job(
             from handlers.admin import handle_admin_enable_provider
             await handle_admin_enable_provider(**kwargs)
 
-        elif intent == "search":
-            # 'search' may arrive from semantic routing
-            from handlers.movie_handlers import handle_movie
-            await handle_movie(**kwargs)
-
-        elif intent == "movie_search":
-            # 'movie_search' may arrive from semantic routing
+        elif intent in ("search", "movie_search"):
             from handlers.movie_handlers import handle_movie
             await handle_movie(**kwargs)
 
         else:
-            # ── Semantic routing fallback ────────────────────────────────
-            # Attempt semantic classification ONCE for long-enough messages.
-            # _semantic_attempted guards against infinite recursion.
             if (
                 intent == "fallback"
                 and not _semantic_attempted
@@ -203,16 +205,25 @@ async def run_intent_job(
                         callback_query_id=callback_query_id,
                         message_id=message_id,
                         user_sent_at=user_sent_at,
-                        _semantic_attempted=True,   # prevent second recursion
+                        _semantic_attempted=True,
                     )
-                    return  # handled by recursive call; skip logging below
+                    return
 
-            # True fallback: no semantic match or text too short
             from handlers.user_handlers import handle_fallback
             await handle_fallback(**kwargs)
 
         latency_ms = int((time.time() - t_start) * 1000)
         bot_replied_at = utc_now_iso()
+
+        # BUG #3 FIX — increment total_interactions stat
+        try:
+            from repositories.admin_repository import AdminRepository
+            AdminRepository().increment_stat("total_interactions")
+        except Exception:
+            pass
+
+        # BUG #8 FIX — read the response text set by the handler
+        bot_response_text = _bot_response_ctx.get("")
 
         LoggingService.log_event(
             chat_id=chat_id_str, intent=intent, step="completed",
@@ -233,6 +244,14 @@ async def run_intent_job(
 
     except Exception as e:
         latency_ms = int((time.time() - t_start) * 1000)
+
+        # BUG #3 FIX — increment total_errors stat
+        try:
+            from repositories.admin_repository import AdminRepository
+            AdminRepository().increment_stat("total_errors")
+        except Exception:
+            pass
+
         LoggingService.log_event(
             chat_id=chat_id_str, intent=intent, step="failed",
             request_id=request_id, provider="worker", status="error",

@@ -1,184 +1,80 @@
-"""Thin async wrappers around the Telegram Bot API.
+"""Telegram send helpers.
 
-All functions are fire-and-forget friendly and swallow network errors
-so a failed Telegram call never crashes the bot logic.
+BUG #8 FIX: every send_message / edit_message call now stores its final
+text in the worker_service context var so log_interaction is populated.
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
-from typing import Any, Dict, List, Optional, Union
-
-import httpx
+from typing import Any, Optional
 
 logger = logging.getLogger("telegram_helpers")
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ""
 
-_client = httpx.AsyncClient(timeout=10.0)
-
-
-async def _post(method: str, payload: Dict[str, Any]) -> Optional[Dict]:
-    if not BASE_URL:
-        logger.debug("[TG] BOT_TOKEN not set — skipping %s", method)
-        return None
+def _record_response(text: str) -> None:
+    """Store the last bot response text in the worker context var (best-effort)."""
     try:
-        r = await _client.post(f"{BASE_URL}/{method}", json=payload)
-        return r.json()
-    except Exception as exc:
-        logger.warning("[TG] %s failed: %s", method, exc)
-        return None
+        from services.worker_service import set_bot_response
+        set_bot_response(str(text))
+    except Exception:
+        pass
 
 
 async def send_message(
     chat_id: Any,
     text: str,
-    reply_markup: Optional[Dict[str, Any]] = None,
     parse_mode: str = "HTML",
-) -> Optional[Dict]:
-    payload: Dict[str, Any] = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode,
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    return await _post("sendMessage", payload)
+    reply_markup: Optional[Any] = None,
+    **kwargs,
+) -> Optional[Any]:
+    """Send a Telegram message and record the response text."""
+    from clients.telegram_client import TelegramClient
+    client = TelegramClient.get_instance()
+    result = await client.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+        **kwargs,
+    )
+    _record_response(text)
+    return result
 
 
-async def send_message_with_keyboard(
+async def edit_message(
     chat_id: Any,
+    message_id: Any,
     text: str,
-    reply_markup: Union[str, Dict[str, Any], None] = None,
     parse_mode: str = "HTML",
-) -> Optional[Dict]:
-    """Send a message with an inline keyboard.
-
-    ``reply_markup`` may be passed as either a pre-serialised JSON string
-    (as broadcast_handlers builds it) or as a plain dict.  Both forms are
-    accepted so callers never need to care about serialisation.
-    """
-    markup: Optional[Dict[str, Any]] = None
-    if isinstance(reply_markup, str):
-        try:
-            markup = json.loads(reply_markup)
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning("[TG] send_message_with_keyboard: invalid JSON markup: %s", exc)
-    elif isinstance(reply_markup, dict):
-        markup = reply_markup
-
-    return await send_message(chat_id, text, reply_markup=markup, parse_mode=parse_mode)
-
-
-async def send_message_safely(
-    chat_id: Any, text: str, **kwargs
-) -> None:
-    """send_message that silently swallows all exceptions."""
-    try:
-        await send_message(chat_id, text, **kwargs)
-    except Exception:
-        pass
-
-
-async def edit_message_text(
-    chat_id: Any,
-    message_id: int,
-    text: str,
-    reply_markup: Optional[Dict[str, Any]] = None,
-    parse_mode: str = "HTML",
-) -> Optional[Dict]:
-    """Edit an existing message (used for in-place pagination updates)."""
-    payload: Dict[str, Any] = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": parse_mode,
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    return await _post("editMessageText", payload)
+    reply_markup: Optional[Any] = None,
+    **kwargs,
+) -> Optional[Any]:
+    """Edit an existing Telegram message and record the new text."""
+    from clients.telegram_client import TelegramClient
+    client = TelegramClient.get_instance()
+    result = await client.edit_message(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+        **kwargs,
+    )
+    _record_response(text)
+    return result
 
 
 async def answer_callback_query(
     callback_query_id: str,
     text: str = "",
     show_alert: bool = False,
-) -> Optional[Dict]:
-    """Acknowledge a Telegram callback query (clears the loading spinner)."""
-    return await _post(
-        "answerCallbackQuery",
-        {
-            "callback_query_id": callback_query_id,
-            "text": text,
-            "show_alert": show_alert,
-        },
+    **kwargs,
+) -> None:
+    from clients.telegram_client import TelegramClient
+    client = TelegramClient.get_instance()
+    await client.answer_callback_query(
+        callback_query_id=callback_query_id,
+        text=text,
+        show_alert=show_alert,
+        **kwargs,
     )
-
-
-async def show_typing(chat_id: Any) -> None:
-    """Send a typing action to indicate the bot is working."""
-    await _post("sendChatAction", {"chat_id": chat_id, "action": "typing"})
-
-
-def build_question_keyboard(
-    q_key: str,
-    options: List[str],
-    selected: Optional[List[str]] = None,
-    show_skip: bool = True,
-    show_done: bool = False,
-) -> Dict[str, Any]:
-    """Build a Telegram InlineKeyboardMarkup for a question-engine question.
-
-    Args:
-        q_key:    The question key, e.g. ``"genre"``.  Used to build callback
-                  data strings of the form ``q_{q_key}_{option}``.
-        options:  List of choice labels to display as buttons.
-        selected: For multi-select questions (genre), the list of already-
-                  chosen options.  Selected options get a leading ✓ checkmark.
-        show_skip: Whether to append a Skip button (callback: ``q_skip_{q_key}``).
-        show_done: Whether to append a Done button (callback: ``q_done_{q_key}``).
-                   Used for multi-select questions where the user confirms their
-                   selection explicitly.
-
-    Returns:
-        A ``reply_markup`` dict ready to pass to ``send_message``.
-
-    Example output (genre question, Action already selected)::
-
-        {
-            "inline_keyboard": [
-                [{"text": "✓ Action", "callback_data": "q_genre_Action"},
-                 {"text": "Comedy",   "callback_data": "q_genre_Comedy"}],
-                ...
-                [{"text": "✓ Done",   "callback_data": "q_done_genre"},
-                 {"text": "Skip",     "callback_data": "q_skip_genre"}],
-            ]
-        }
-    """
-    selected_set: set[str] = set(s.strip() for s in (selected or []) if s.strip())
-
-    # Layout: 2 buttons per row for option buttons
-    rows: List[List[Dict[str, str]]] = []
-    row: List[Dict[str, str]] = []
-    for opt in options:
-        label = f"\u2713 {opt}" if opt in selected_set else opt
-        row.append({"text": label, "callback_data": f"q_{q_key}_{opt}"})
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:  # leftover odd button
-        rows.append(row)
-
-    # Control row: Done and/or Skip
-    control_row: List[Dict[str, str]] = []
-    if show_done:
-        done_label = "\u2713 Done" if selected_set else "Done"
-        control_row.append({"text": done_label, "callback_data": f"q_done_{q_key}"})
-    if show_skip:
-        control_row.append({"text": "Skip", "callback_data": f"q_skip_{q_key}"})
-    if control_row:
-        rows.append(control_row)
-
-    return {"inline_keyboard": rows}
