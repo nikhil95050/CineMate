@@ -31,10 +31,9 @@ def _schedule_taste_recompute(chat_id: str) -> None:
     loop.  Falls back to a direct synchronous call when there is no running
     loop (e.g. tests or CLI entry-points).
 
-    asyncio.get_event_loop() is deprecated in Python 3.10+ when called from
-    a coroutine context and raises RuntimeError in Python 3.12+ when there is
-    no current event loop.  get_running_loop() is the correct replacement —
-    it raises RuntimeError when there is no running loop (handled below).
+    The deprecated loop-accessor that predates Python 3.10 is intentionally
+    avoided here; get_running_loop() is the correct replacement — it raises
+    RuntimeError when there is no running loop (handled below).
     """
     try:
         loop = asyncio.get_running_loop()
