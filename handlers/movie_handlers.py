@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, Optional
 
 from clients.telegram_card import send_movies_async
@@ -11,6 +12,10 @@ from services.container import rec_service, session_service, user_service
 from services.logging_service import get_logger
 
 logger = get_logger("movie_handlers")
+
+# Matches any leading slash-command word so that both '/movie Inception' and
+# 'movie_search Inception' (routed via normalizer) strip correctly.
+_MOVIE_PREFIX_RE = re.compile(r"^/?(?:movie(?:_search)?)\s+", re.IGNORECASE)
 
 
 async def handle_movie(
@@ -22,12 +27,8 @@ async def handle_movie(
 ) -> None:
     """Handle /movie <title> — similarity recommendations."""
     text = input_text.strip()
-    for prefix in ("/movie ", "movie "):
-        if text.lower().startswith(prefix):
-            seed_title = text[len(prefix):].strip()
-            break
-    else:
-        seed_title = ""
+    match = _MOVIE_PREFIX_RE.match(text)
+    seed_title = text[match.end():].strip() if match else ""
 
     if not seed_title:
         await send_message(
@@ -117,8 +118,6 @@ async def handle_more_like(
     await show_typing(chat_id)
     await send_message(chat_id, f"\U0001f3af Finding movies like <b>{seed_title}</b>\u2026")
 
-    # P5-1: Build seen_titles from the current session and pass them to
-    # get_recommendations so the discovery layer excludes already-shown titles.
     seen_titles: list = []
     try:
         seen_titles = [
@@ -133,7 +132,7 @@ async def handle_more_like(
         mode="more_like",
         chat_id=str(chat_id),
         seed_title=seed_title,
-        seen_titles=seen_titles,   # ← P5-1: was built but never forwarded before
+        seen_titles=seen_titles,
     )
     await send_movies_async(chat_id, movies)
 

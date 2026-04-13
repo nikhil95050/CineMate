@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import weakref
 from typing import Any, Dict, List, Optional
 
 from models.domain import MovieModel, SessionModel, UserModel
@@ -13,6 +14,10 @@ from services.logging_service import get_logger, error_batcher  # noqa: F401 —
 logger = get_logger("rec_service")
 
 BATCH_SIZE = 5
+
+# Fix 3: hold strong references to background tasks so Python 3.11+ cannot
+# silently GC-cancel them before the event loop finishes them.
+_background_tasks: weakref.WeakSet = weakref.WeakSet()
 
 
 def _parse_json_list(raw: str) -> List[Dict[str, Any]]:
@@ -49,8 +54,8 @@ class RecommendationService:
 
     async def get_recommendations(
         self,
-        session: SessionModel = None,
-        user: UserModel = None,
+        session: Optional[SessionModel] = None,  # Fix 2: was `SessionModel = None`
+        user: Optional[UserModel] = None,
         mode: str = "question_engine",
         chat_id: str = "",
         seed_title: str = "",
@@ -59,14 +64,14 @@ class RecommendationService:
     ) -> List[Dict[str, Any]]:
         """Return up to BATCH_SIZE enriched movie dicts, with overflow buffered in session."""
 
-        last_recs = _parse_json_list(session.last_recs_json) if session else []
+        # Fix 2: guard every session attribute access behind an explicit None check
+        last_recs = _parse_json_list(session.last_recs_json) if session is not None else []
         excluded_ids = {str(r.get("movie_id", "")) for r in last_recs if r.get("movie_id")}
         excluded_titles = {str(r.get("title", "")).lower() for r in last_recs if r.get("title")}
 
-        min_rating = self._resolve_min_rating(session, user) if session else None
+        min_rating = self._resolve_min_rating(session, user) if session is not None else None
 
         seen_titles = list(excluded_titles)
-        # Pass chat_id and request_id so discovery can log errors with real context
         candidates = await self._discovery.discover(
             mode=mode,
             session=session,
@@ -94,14 +99,13 @@ class RecommendationService:
         to_show = deduped[:BATCH_SIZE]
         overflow = deduped[BATCH_SIZE:]
 
-        # Pass chat_id to enrichment so Watchmode errors carry a real chat_id
         enriched = await self._enrichment.enrich_movies(
             to_show,
             chat_id=chat_id or "system",
         )
 
-        # Only touch session_service when a real session object is present
-        if chat_id and session:
+        # Fix 2: guard session access — only touch session_service when session is real
+        if chat_id and session is not None:
             from services.container import session_service  # deferred to avoid import cycles
             session_model = session_service.get_session(chat_id)
             session_model.last_recs_json = json.dumps([m.model_dump() for m in enriched])
@@ -109,23 +113,30 @@ class RecommendationService:
             session_service.upsert_session(session_model)
 
         if overflow:
-            asyncio.create_task(
+            # Fix 3: store task reference in module-level WeakSet to prevent
+            # silent GC-cancellation under Python 3.11+ event-loop teardown.
+            task = asyncio.create_task(
                 self._enrichment.enrich_movies(overflow, chat_id=chat_id or "system")
             )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
         return [m.model_dump() for m in enriched]
 
     async def get_more_suggestions(
         self,
-        session: SessionModel,
-        user: UserModel,
+        session: Optional[SessionModel] = None,  # Fix 2: was `SessionModel` without Optional
+        user: Optional[UserModel] = None,
         chat_id: str = "",
         request_id: str = "N/A",
     ) -> List[Dict[str, Any]]:
         """Return movies from the overflow buffer; if empty, re-discover."""
         from services.container import session_service  # deferred to avoid import cycles
 
-        overflow = _parse_json_list(session.overflow_buffer_json)
+        # Fix 2: guard against None session
+        overflow_raw = session.overflow_buffer_json if session is not None else None
+        overflow = _parse_json_list(overflow_raw) if overflow_raw else []
+
         if overflow:
             batch = overflow[:BATCH_SIZE]
             rest = overflow[BATCH_SIZE:]
@@ -134,13 +145,14 @@ class RecommendationService:
                 chat_id=chat_id or "system",
             )
 
-            session_model = session_service.get_session(chat_id)
-            new_last = _parse_json_list(session_model.last_recs_json) + [
-                m.model_dump() for m in enriched
-            ]
-            session_model.last_recs_json = json.dumps(new_last[-20:])
-            session_model.overflow_buffer_json = json.dumps(rest)
-            session_service.upsert_session(session_model)
+            if chat_id and session is not None:
+                session_model = session_service.get_session(chat_id)
+                new_last = _parse_json_list(session_model.last_recs_json) + [
+                    m.model_dump() for m in enriched
+                ]
+                session_model.last_recs_json = json.dumps(new_last[-20:])
+                session_model.overflow_buffer_json = json.dumps(rest)
+                session_service.upsert_session(session_model)
 
             return [m.model_dump() for m in enriched]
 
@@ -149,8 +161,10 @@ class RecommendationService:
         )
 
     def _resolve_min_rating(
-        self, session: SessionModel, user: Optional[UserModel]
+        self, session: Optional[SessionModel], user: Optional[UserModel]
     ) -> Optional[float]:
+        if session is None:
+            return None
         raw = session.answers_rating or ""
         mapping = {"6+": 6.0, "7+": 7.0, "8+": 8.0, "9+": 9.0, "any": None}
         val = mapping.get(raw.lower())
