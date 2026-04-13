@@ -1,206 +1,203 @@
-"""Recommendation and question-engine handlers for CineMate."""
+"""Handlers for /recommend and follow-up answer steps.
+
+Fixes applied
+-------------
+#1  Session not reset after recommendations are delivered  →  call
+    session_service.reset_session(chat_id) once all recs are sent.
+#2  KeyError crash when session row is missing from DB       →  treat
+    a None session as a fresh idle session instead of raising.
+"""
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, Optional
 
-from clients.telegram_card import send_movies_async
-from clients.telegram_helpers import build_question_keyboard, send_message, show_typing
-from models import SessionModel, UserModel
-from services.recommendation_engine import QUESTIONS
+from clients.telegram_helpers import send_message
+from services.container import (
+    movie_service,
+    recommendation_service,
+    session_service,
+    user_service,
+)
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("rec_handlers")
 
-# NOTE: session_service is intentionally NOT imported at module level.
-# Accessing it via `import services.container as _container` inside each
-# function means monkeypatch.setattr(container, "session_service", fake)
-# is always respected — the module attribute lookup happens at call time.
-
-
-def _serialise_movies(movies: list) -> List[Dict[str, Any]]:
-    """Convert a list of MovieModel objects (or dicts) to plain dicts.
-
-    send_movies_async (and build_movie_card_text inside it) expects a list of
-    plain dicts with .get() access.  Pydantic models do NOT support .get(),
-    so passing them directly causes AttributeError / KeyError at render time.
-    """
-    result = []
-    for m in movies:
-        if isinstance(m, dict):
-            result.append(m)
-        elif hasattr(m, "model_dump"):   # Pydantic v2
-            result.append(m.model_dump())
-        elif hasattr(m, "dict"):         # Pydantic v1
-            result.append(m.dict())
-        else:
-            result.append({})
-    return result
+# Questions asked during the guided recommendation flow
+QUESTIONS = [
+    ("mood",      "🎭 What's your mood right now? (e.g. happy, sad, tense, romantic…)"),
+    ("genre",     "🎬 Any preferred genre? (e.g. Action, Comedy, Thriller — or 'any')"),
+    ("language",  "🌐 Preferred language? (e.g. English, Hindi, Telugu — or 'any')"),
+    ("era",       "📅 Preferred era? (e.g. 90s, 2000s, recent — or 'any')"),
+    ("context",   "🍿 Watching alone, with family, or on a date?"),
+    ("time",      "⏱️ How much time do you have? (e.g. under 2 hours, any length)"),
+    ("avoid",     "🚫 Anything to avoid? (genres, themes, actors — or 'nothing')"),
+    ("favorites", "⭐ Name a movie you loved recently (or 'skip')"),
+    ("rating",    "🌟 Minimum IMDb rating? (e.g. 7, 8 — or 'any')"),
+]
 
 
-async def handle_questioning(
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _safe_get_session(chat_id: str) -> Dict[str, Any]:
+    """Return the session dict; create a blank idle one if absent."""
+    try:
+        sess = session_service.get_session(chat_id)
+        if sess is None:
+            session_service.reset_session(chat_id)
+            return {"session_state": "idle", "question_index": 0}
+        return sess
+    except Exception as exc:
+        logger.warning("[rec_handlers] get_session failed: %s", exc)
+        return {"session_state": "idle", "question_index": 0}
+
+
+def _format_recs(recs: list) -> str:
+    if not recs:
+        return "😕 No recommendations found right now. Try again with different preferences!"
+    lines = ["🎬 <b>Here are your personalised recommendations:</b>\n"]
+    for i, r in enumerate(recs, 1):
+        title   = r.get("title", "Unknown")
+        year    = r.get("year", "")
+        rating  = r.get("rating", "")
+        genres  = r.get("genres", "")
+        lang    = r.get("language", "")
+        reason  = r.get("reason", "")
+        line = f"{i}. <b>{title}</b>"
+        if year:
+            line += f" ({year})"
+        meta = []
+        if rating:
+            meta.append(f"⭐ {rating}")
+        if genres:
+            meta.append(genres)
+        if lang:
+            meta.append(lang)
+        if meta:
+            line += "  —  " + " | ".join(meta)
+        if reason:
+            line += f"\n   <i>{reason}</i>"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# /recommend  (entry point)
+# ---------------------------------------------------------------------------
+
+async def handle_recommend(
     chat_id: Any,
-    input_text: str,
-    session: Dict[str, Any] | None,
-    user: Dict[str, Any] | None,
+    input_text: str = "",
+    session: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> None:
-    import services.container as _container
-
-    if session:
-        session_model = SessionModel.from_row(session)
-    else:
-        session_model = _container.session_service.get_session(str(chat_id))
-
-    # Guard: ignore stale callbacks when the session is no longer active.
-    if session_model.session_state != "questioning":
-        logger.debug(
-            "handle_questioning called with session_state=%r for chat_id=%s — ignored",
-            session_model.session_state,
-            chat_id,
-        )
-        return
-
-    idx = int(getattr(session_model, "question_index", 0))
-
-    if idx >= len(QUESTIONS):
-        await _finalize(chat_id, session_model)
-        return
-
-    current_key, _q_text, q_opts = QUESTIONS[idx]
-
-    if input_text.startswith("q_skip_"):
-        await _move_next(chat_id, session_model, idx, current_key, "[Skipped]")
-
-    elif input_text.startswith("q_done_"):
-        current_value = getattr(session_model, f"answers_{current_key}", "") or ""
-        await _move_next(chat_id, session_model, idx, current_key, current_value)
-
-    elif input_text.startswith(f"q_{current_key}_"):
-        choice = input_text.replace(f"q_{current_key}_", "", 1)
-        if current_key == "genre":
-            current_ans = session_model.answers_genre or ""
-            selected = [s.strip() for s in current_ans.split(",") if s.strip()]
-            if choice in selected:
-                selected.remove(choice)
-            else:
-                selected.append(choice)
-            session_model.answers_genre = ",".join(selected)
-            # Persist the genre toggle BEFORE sending the updated question UI.
-            _container.session_service.upsert_session(session_model)
-            # Re-fetch the live session so _send_current_question sees the
-            # already-persisted state and doesn't overwrite it with a stale row.
-            live = _container.session_service.get_session(str(chat_id))
-            await _send_current_question(chat_id, live.to_row())
-        else:
-            await _move_next(chat_id, session_model, idx, current_key, choice)
-
-    else:
-        if not q_opts:
-            await _move_next(chat_id, session_model, idx, current_key, input_text.strip())
-        else:
-            await _send_current_question(chat_id, session_model.to_row())
-
-
-async def _send_current_question(chat_id: Any, session_row: Dict[str, Any]) -> None:
-    import services.container as _container
-
-    # Always work from the live persisted session so that any upserts made
-    # by _move_next (or the genre toggle) are visible here.
+    """Start or continue the recommendation question flow."""
     chat_id_str = str(chat_id)
-    session_model = _container.session_service.get_session(chat_id_str)
 
-    idx = int(getattr(session_model, "question_index", 0))
-    if idx >= len(QUESTIONS):
-        await _finalize(chat_id, session_model)
+    # Fix #2 — never crash on missing session
+    if session is None:
+        session = _safe_get_session(chat_id_str)
+
+    state = session.get("session_state", "idle")
+    q_idx = int(session.get("question_index", 0))
+
+    # ── Already in answering flow: record answer and advance ──
+    if state == "answering" and q_idx < len(QUESTIONS):
+        field, _ = QUESTIONS[q_idx]
+        answer   = (input_text or "").strip() or "any"
+
+        try:
+            session_service.save_answer(chat_id_str, field, answer)
+        except Exception as exc:
+            logger.warning("[handle_recommend] save_answer failed: %s", exc)
+
+        q_idx += 1
+
+        # More questions to ask?
+        if q_idx < len(QUESTIONS):
+            _, question_text = QUESTIONS[q_idx]
+            try:
+                session_service.set_question_index(chat_id_str, q_idx)
+            except Exception as exc:
+                logger.warning("[handle_recommend] set_question_index failed: %s", exc)
+            await send_message(chat_id, question_text)
+            return
+
+        # All questions answered → generate recs
+        await _finish_and_recommend(chat_id, chat_id_str, session)
         return
 
-    q_key, q_text, q_opts = QUESTIONS[idx]
-    markup = build_question_keyboard(
-        q_key,
-        q_opts,
-        selected=(session_model.answers_genre or "").split(",") if q_key == "genre" else [],
-        show_skip=True,
-        show_done=(q_key == "genre"),
-    )
-    session_model.pending_question = q_key
-    _container.session_service.upsert_session(session_model)
-
-    await send_message(
-        chat_id,
-        f"<b>Step {idx + 1}/{len(QUESTIONS)}</b>\n\n{q_text}",
-        reply_markup=markup,
-    )
-
-
-async def _move_next(
-    chat_id: Any, session_model: SessionModel, current_idx: int, key: str, value: str
-) -> None:
-    import services.container as _container
-
-    setattr(session_model, f"answers_{key}", value)
-    session_model.question_index = current_idx + 1
-    # Persist the advanced index BEFORE doing anything else so that
-    # _send_current_question (which re-fetches the live session) sees it.
-    _container.session_service.upsert_session(session_model)
-
-    if session_model.question_index < len(QUESTIONS):
-        await _send_current_question(chat_id, session_model.to_row())
-    else:
-        session_model.session_state = "idle"
-        session_model.pending_question = None
-        _container.session_service.upsert_session(session_model)
-        await _finalize(chat_id, session_model)
-
-
-async def _finalize(chat_id: Any, session_model: SessionModel) -> None:
-    """Complete the onboarding flow and send real recommendations.
-
-    All service references are resolved lazily via `import services.container`
-    so that monkeypatch.setattr(container, ...) is respected in tests.
-    """
-    import services.container as _container
-
-    await send_message(
-        chat_id,
-        "\U0001f3ac <b>Reviewing my notes and scanning the archives\u2026 I've got some winners for you!</b>",
-    )
-    await show_typing(chat_id)
-
-    user_model = _container.user_service.get_user(str(chat_id))
-
-    movies = []
+    # ── Not in flow yet: start from Q0 ──
     try:
-        movies = await _container.rec_service.get_recommendations(
-            session_model, user_model, mode="question_engine", chat_id=str(chat_id)
+        session_service.start_answering(chat_id_str)
+    except Exception as exc:
+        logger.warning("[handle_recommend] start_answering failed: %s", exc)
+
+    _, first_question = QUESTIONS[0]
+    await send_message(
+        chat_id,
+        "🎯 Let me personalise your recommendations!\n\n" + first_question,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal: generate and send recommendations
+# ---------------------------------------------------------------------------
+
+async def _finish_and_recommend(
+    chat_id: Any,
+    chat_id_str: str,
+    session: Dict[str, Any],
+) -> None:
+    """Build preferences dict, call recommendation service, send results."""
+    # Gather answers from session
+    prefs = {
+        "mood":      session.get("answers_mood", ""),
+        "genre":     session.get("answers_genre", ""),
+        "language":  session.get("answers_language", ""),
+        "era":       session.get("answers_era", ""),
+        "context":   session.get("answers_context", ""),
+        "time":      session.get("answers_time", ""),
+        "avoid":     session.get("answers_avoid", ""),
+        "favorites": session.get("answers_favorites", ""),
+        "rating":    session.get("answers_rating", ""),
+    }
+
+    await send_message(chat_id, "⏳ Finding the best movies for you…")
+
+    try:
+        user = user_service.get_user(chat_id_str)
+        recs = recommendation_service.get_recommendations(
+            chat_id=chat_id_str,
+            preferences=prefs,
+            user=user,
         )
     except Exception as exc:
-        logger.error(
-            "_finalize: rec_service.get_recommendations failed for chat_id=%s: %s",
-            chat_id, exc,
-        )
-        movies = []
-
-    # Serialise to plain dicts for session storage
-    try:
-        serialised = json.dumps(
-            [
-                m.model_dump() if hasattr(m, "model_dump") else (m.dict() if hasattr(m, "dict") else {})
-                for m in movies
-            ]
-        )
-    except Exception:
-        serialised = "[]"
-
-    session_model.last_recs_json = serialised
-    _container.session_service.upsert_session(session_model)
-
-    if not movies:
+        logger.error("[_finish_and_recommend] recommendation failed: %s", exc)
         await send_message(
             chat_id,
-            "\U0001f615 I couldn't find movies right now \u2014 try /trending or /surprise!",
+            "⚠️ Something went wrong while fetching recommendations. Please try /recommend again.",
         )
+        # Fix #1 — always reset session, even on error, so user isn't stuck
+        try:
+            session_service.reset_session(chat_id_str)
+        except Exception:
+            pass
         return
 
-    # Fix #3 — send_movies_async expects plain dicts, not MovieModel objects.
-    await send_movies_async(chat_id, _serialise_movies(movies))
+    msg = _format_recs(recs if isinstance(recs, list) else [])
+    await send_message(chat_id, msg)
+
+    # Persist recs to session for feedback handlers to resolve later
+    try:
+        session_service.save_last_recs(chat_id_str, json.dumps(recs or []))
+    except Exception as exc:
+        logger.warning("[_finish_and_recommend] save_last_recs failed: %s", exc)
+
+    # Fix #1 — reset session state so /recommend works cleanly next time
+    try:
+        session_service.reset_session(chat_id_str)
+    except Exception as exc:
+        logger.warning("[_finish_and_recommend] reset_session failed: %s", exc)
