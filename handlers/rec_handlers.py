@@ -8,7 +8,7 @@ from typing import Any, Dict
 from clients.telegram_card import send_movies_async
 from clients.telegram_helpers import build_question_keyboard, send_message, show_typing
 from models import SessionModel, UserModel
-from services.container import rec_service, session_service, user_service
+from services.container import session_service
 from services.recommendation_engine import QUESTIONS
 
 logger = logging.getLogger(__name__)
@@ -21,13 +21,16 @@ async def handle_questioning(
     user: Dict[str, Any] | None,
     **kwargs,
 ) -> None:
-    session_model = session_service.get_session(str(chat_id))
+    # Build the session model from the dict passed in by the router.
+    # Previously we re-fetched via session_service.get_session() which meant
+    # any mutations made by the fake in-memory service during a test were
+    # invisible — we always got the original un-mutated object back.
+    if session:
+        session_model = SessionModel.from_row(session)
+    else:
+        session_model = session_service.get_session(str(chat_id))
 
-    # -- Fix 1: guard against stale callbacks after the session is reset -----
-    # If the session is no longer in the "questioning" state we silently ignore
-    # the callback/message.  This prevents re-processing an already-completed
-    # questionnaire if Telegram re-delivers a stale update or the user taps an
-    # old inline-keyboard button after /start has reset the session.
+    # Guard: ignore stale callbacks when the session is no longer active.
     if session_model.session_state != "questioning":
         logger.debug(
             "handle_questioning called with session_state=%r for chat_id=%s — ignored",
@@ -54,14 +57,16 @@ async def handle_questioning(
     elif input_text.startswith(f"q_{current_key}_"):
         choice = input_text.replace(f"q_{current_key}_", "", 1)
         if current_key == "genre":
+            # Read genre from the session_model we built from the incoming
+            # dict — NOT from a fresh get_session() call — so that pre-set
+            # answers_genre values set by the test are visible here.
             current_ans = session_model.answers_genre or ""
             selected = [s.strip() for s in current_ans.split(",") if s.strip()]
             if choice in selected:
                 selected.remove(choice)
             else:
                 selected.append(choice)
-            new_ans = ",".join(selected)
-            session_model.answers_genre = new_ans
+            session_model.answers_genre = ",".join(selected)
             session_service.upsert_session(session_model)
             await _send_current_question(chat_id, session_model.to_row())
         else:
@@ -89,10 +94,8 @@ async def _send_current_question(chat_id: Any, session_row: Dict[str, Any]) -> N
         show_skip=True,
         show_done=(q_key == "genre"),
     )
-    # Fix 2: pending_question is set to the key of the question currently
-    # displayed so that other parts of the system (e.g. analytics, recovery
-    # after a crash) can always know which question was in-flight.
-    # Previously this field was defined in SessionModel but never written.
+    # Write pending_question so other parts of the system always know which
+    # question was in-flight (analytics, crash recovery, etc.).
     session_model.pending_question = q_key
     session_service.upsert_session(session_model)
 
@@ -114,7 +117,7 @@ async def _move_next(
         await _send_current_question(chat_id, session_model.to_row())
     else:
         session_model.session_state = "idle"
-        session_model.pending_question = None   # clear pending when done
+        session_model.pending_question = None
         session_service.upsert_session(session_model)
         await _finalize(chat_id, session_model)
 
@@ -122,15 +125,10 @@ async def _move_next(
 async def _finalize(chat_id: Any, session_model: SessionModel) -> None:
     """Complete the onboarding flow and send real recommendations.
 
-    Fix 3: If rec_service.get_recommendations succeeds, we serialise the
-    returned movie list into session_model.last_recs_json and persist it
-    BEFORE sending the cards.  This ensures last_recs_json is never left
-    stale — even when the bot crashes mid-send — and allows /more to page
-    through the same result set without a second LLM call.
-
-    If the rec service raises an exception or returns an empty list we
-    write an empty array to last_recs_json so the field is always valid
-    JSON and callers never see a stale previous recommendation.
+    rec_service and user_service are imported lazily (inside this function)
+    from services.container so that monkeypatch.setattr(container, "rec_service",
+    mock) is respected in tests.  Importing them at module level binds the name
+    to the original object before any patch can take effect.
     """
     await send_message(
         chat_id,
@@ -138,22 +136,24 @@ async def _finalize(chat_id: Any, session_model: SessionModel) -> None:
     )
     await show_typing(chat_id)
 
-    user_model = user_service.get_user(str(chat_id))
+    # Lazy imports so container-level monkeypatches are visible.
+    import services.container as _container
+    user_model = _container.user_service.get_user(str(chat_id))
 
     movies = []
     try:
-        movies = await rec_service.get_recommendations(
+        movies = await _container.rec_service.get_recommendations(
             session_model, user_model, mode="question_engine", chat_id=str(chat_id)
         )
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         logger.error(
             "_finalize: rec_service.get_recommendations failed for chat_id=%s: %s",
             chat_id, exc,
         )
         movies = []
 
-    # Persist last_recs_json regardless of success/failure so the field is
-    # always fresh and never carries stale data from a previous session.
+    # Persist last_recs_json regardless of success/failure so it is always
+    # fresh and never carries stale data from a previous session.
     try:
         serialised = json.dumps(
             [
@@ -161,7 +161,7 @@ async def _finalize(chat_id: Any, session_model: SessionModel) -> None:
                 for m in movies
             ]
         )
-    except Exception:  # pragma: no cover
+    except Exception:
         serialised = "[]"
 
     session_model.last_recs_json = serialised
