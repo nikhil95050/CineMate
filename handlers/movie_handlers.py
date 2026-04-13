@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from clients.telegram_card import send_movies_async
 from clients.telegram_helpers import send_message, show_typing
@@ -16,11 +16,29 @@ logger = get_logger("movie_handlers")
 # Matches any leading slash-command word so that '/movie Inception',
 # 'movie_search Inception', '/search Inception' and 'search Inception'
 # (all routed to handle_movie by worker_service) strip correctly.
-# Fix #6: added 'search' as an additional recognised prefix so that the
-# full '/search <query>' string is never passed as the seed_title to the LLM.
 _MOVIE_PREFIX_RE = re.compile(
     r"^/?(?:search|movie(?:_search)?)\s+", re.IGNORECASE
 )
+
+
+def _serialise_movies(movies: list) -> List[Dict[str, Any]]:
+    """Convert a list of MovieModel objects (or plain dicts) to plain dicts.
+
+    send_movies_async / build_movie_card_text uses dict.get() to read fields.
+    Pydantic models do not support .get(), so passing them unwrapped raises
+    AttributeError at render time.  This helper normalises both forms safely.
+    """
+    result = []
+    for m in movies:
+        if isinstance(m, dict):
+            result.append(m)
+        elif hasattr(m, "model_dump"):   # Pydantic v2
+            result.append(m.model_dump())
+        elif hasattr(m, "dict"):         # Pydantic v1
+            result.append(m.dict())
+        else:
+            result.append({})
+    return result
 
 
 async def handle_movie(
@@ -53,7 +71,8 @@ async def handle_movie(
     movies = await rec_service.get_recommendations(
         session_model, user_model, mode="movie", chat_id=str(chat_id), seed_title=seed_title
     )
-    await send_movies_async(chat_id, movies)
+    # Fix #4 — serialise before passing to send_movies_async
+    await send_movies_async(chat_id, _serialise_movies(movies))
 
 
 async def handle_trending(
@@ -73,7 +92,8 @@ async def handle_trending(
     movies = await rec_service.get_recommendations(
         session_model, user_model, mode="trending", chat_id=str(chat_id)
     )
-    await send_movies_async(chat_id, movies)
+    # Fix #4 — serialise before passing to send_movies_async
+    await send_movies_async(chat_id, _serialise_movies(movies))
 
 
 async def handle_surprise(
@@ -93,7 +113,8 @@ async def handle_surprise(
     movies = await rec_service.get_recommendations(
         session_model, user_model, mode="surprise", chat_id=str(chat_id)
     )
-    await send_movies_async(chat_id, movies)
+    # Fix #4 — serialise before passing to send_movies_async
+    await send_movies_async(chat_id, _serialise_movies(movies))
 
 
 async def handle_more_like(
@@ -124,10 +145,7 @@ async def handle_more_like(
     await show_typing(chat_id)
     await send_message(chat_id, f"\U0001f3af Finding movies like <b>{seed_title}</b>\u2026")
 
-    # Fix #15: exclude all previously-seen titles EXCEPT the seed movie itself.
-    # Including seed_title in the exclusion list told the LLM not to return the
-    # very film we're basing recommendations on, which could reduce the usable
-    # candidate pool to zero when last_recs_raw is small.
+    # Exclude all previously-seen titles EXCEPT the seed movie itself.
     seen_titles: list = []
     try:
         seen_titles = [
@@ -146,7 +164,8 @@ async def handle_more_like(
         seed_title=seed_title,
         seen_titles=seen_titles,
     )
-    await send_movies_async(chat_id, movies)
+    # Fix #4 — serialise before passing to send_movies_async
+    await send_movies_async(chat_id, _serialise_movies(movies))
 
 
 async def handle_more_suggestions(
@@ -165,4 +184,5 @@ async def handle_more_suggestions(
     movies = await rec_service.get_more_suggestions(
         session_model, user_model, chat_id=str(chat_id)
     )
-    await send_movies_async(chat_id, movies)
+    # Fix #5 — serialise before passing to send_movies_async
+    await send_movies_async(chat_id, _serialise_movies(movies))
