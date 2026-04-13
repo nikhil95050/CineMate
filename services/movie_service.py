@@ -12,68 +12,15 @@ from typing import Any, Dict, List, Optional
 
 from models.domain import MovieModel, UserModel, SessionModel
 
+# Formatting helpers live in utils/formatters.py (pure presentation layer).
+# Re-exported here so existing imports of the form
+#   from services.movie_service import format_history_list
+# continue to work without change.
+from utils.formatters import format_history_list, format_watchlist_list  # noqa: F401
+
 logger = logging.getLogger("movie_service")
 
 PAGE_SIZE = 10
-
-
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
-
-def format_history_list(
-    rows: List[Dict[str, Any]],
-    page: int,
-    total_pages: int,
-) -> str:
-    """Return an HTML-formatted string for a page of history rows."""
-    if not rows:
-        return (
-            "\U0001f5c2 <b>Your History</b>\n\n"
-            "No recommendations yet. Send /start to discover your first movie!"
-        )
-    offset = (page - 1) * PAGE_SIZE
-    lines = [f"\U0001f5c2 <b>Recommendation History</b> \u2014 Page {page}/{total_pages}\n"]
-    for i, row in enumerate(rows, start=offset + 1):
-        title = row.get("title") or "Unknown"
-        year = row.get("year") or ""
-        rating = row.get("rating") or ""
-        watched = row.get("watched", False)
-        entry = f"{i}. <b>{title}</b>"
-        if year:
-            entry += f" ({year})"
-        if rating:
-            entry += f" \u2b50 {rating}"
-        if watched:
-            entry += " \u2714\ufe0f"
-        lines.append(entry)
-    return "\n".join(lines)
-
-
-def format_watchlist_list(
-    rows: List[Dict[str, Any]],
-    page: int,
-    total_pages: int,
-) -> str:
-    """Return an HTML-formatted string for a page of watchlist rows."""
-    if not rows:
-        return (
-            "\U0001f4c2 <b>Your Watchlist</b>\n\n"
-            "Nothing saved yet. Tap <b>Save to Watchlist</b> on any recommendation!"
-        )
-    offset = (page - 1) * PAGE_SIZE
-    lines = [f"\U0001f4c2 <b>Watchlist</b> \u2014 Page {page}/{total_pages}\n"]
-    for i, row in enumerate(rows, start=offset + 1):
-        title = row.get("title") or "Unknown"
-        year = row.get("year") or ""
-        rating = row.get("rating") or ""
-        entry = f"{i}. <b>{title}</b>"
-        if year:
-            entry += f" ({year})"
-        if rating:
-            entry += f" \u2b50 {rating}"
-        lines.append(entry)
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -140,20 +87,16 @@ class MovieService:
 
     def get_movie_from_history(
         self, chat_id: str, movie_id: str
-    ) -> Optional[MovieModel]:
-        """Return a MovieModel for the given movie_id, or None if not found.
+    ) -> Optional[Dict[str, Any]]:
+        """Return the raw history row dict for the given movie_id, or None.
 
-        Previously returned a raw dict; now consistently returns a typed
-        MovieModel so callers always work with the domain model, not dicts.
-        Callers that need a dict can call .model_dump().
+        Returns a plain dict so handlers can call .get() directly and tests
+        can compare with _history_row() fixtures without model conversion.
         """
         if not self.history_repo:
             return None
         try:
-            row = self.history_repo.get_by_movie_id(chat_id, movie_id)
-            if row is None:
-                return None
-            return MovieModel.from_history_row(row)
+            return self.history_repo.get_by_movie_id(chat_id, movie_id)
         except Exception as exc:
             logger.warning(
                 "[MovieService] get_movie_from_history failed: %s", exc
@@ -163,6 +106,20 @@ class MovieService:
     # ------------------------------------------------------------------
     # Watchlist
     # ------------------------------------------------------------------
+
+    def is_in_watchlist(self, chat_id: str, movie_id: str) -> bool:
+        """Check whether a movie is already in the watchlist.
+
+        Encapsulates watchlist_repo access so handlers never touch the
+        repository directly — spec requires all repo access via MovieService.
+        """
+        if not self.watchlist_repo:
+            return False
+        try:
+            return bool(self.watchlist_repo.is_in_watchlist(chat_id, movie_id))
+        except Exception as exc:
+            logger.warning("[MovieService] is_in_watchlist failed: %s", exc)
+            return False
 
     def add_to_watchlist(
         self, chat_id: str, movie: MovieModel
@@ -199,11 +156,11 @@ class MovieService:
 
     def get_random_watchlist_reminder(
         self, chat_id: str
-    ) -> Optional[MovieModel]:
-        """Return a random unwatched watchlist item as a MovieModel, or None.
+    ) -> Optional[Dict[str, Any]]:
+        """Return a random watchlist row dict, or None if the list is empty.
 
-        Previously returned a raw dict; now consistently returns a typed
-        MovieModel so callers always work with the domain model.
+        Returns a plain dict so callers can use .get() directly and tests
+        can compare with raw row fixtures without model conversion.
         """
         if not self.watchlist_repo:
             return None
@@ -211,8 +168,7 @@ class MovieService:
             rows = self.watchlist_repo.get_watchlist(chat_id, page=1) or []
             if not rows:
                 return None
-            row = random.choice(rows)
-            return MovieModel.from_history_row(row)
+            return random.choice(rows)
         except Exception as exc:
             logger.warning(
                 "[MovieService] get_random_watchlist_reminder failed: %s", exc
@@ -238,11 +194,7 @@ class WatchlistService:
     async def add(
         self, chat_id: str, movie: MovieModel
     ) -> None:
-        """Accept a MovieModel directly — consistent with the service layer.
-
-        Previously accepted a raw dict and called MovieModel.from_history_row()
-        internally, which masked type errors. Callers must now pass a MovieModel.
-        """
+        """Accept a MovieModel directly — consistent with the service layer."""
         self._svc.add_to_watchlist(chat_id, movie)
 
 
@@ -260,11 +212,7 @@ class HistoryService:
     async def add(
         self, chat_id: str, movies: List[MovieModel]
     ) -> None:
-        """Accept a list of MovieModel objects — consistent with the service layer.
-
-        Previously accepted raw dicts and converted internally. Callers must
-        now pass typed MovieModel instances.
-        """
+        """Accept a list of MovieModel objects — consistent with the service layer."""
         self._svc.add_to_history(chat_id, movies)
 
 

@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import json
-import math
 from typing import Any, Dict, List, Optional
 
 from clients.telegram_helpers import answer_callback_query, edit_message_text, send_message
 from models.domain import MovieModel
-from services.movie_service import format_history_list, format_watchlist_list
+from utils.formatters import format_history_list, format_watchlist_list
 
 PAGE_SIZE = 10
 
@@ -171,7 +170,8 @@ async def handle_watched(
 
     success = movie_service.mark_watched(str(chat_id), movie_id)
 
-    # Friendly feedback — resolve title from history if possible
+    # Friendly feedback — resolve title from history if possible.
+    # get_movie_from_history returns a raw dict (or None).
     row = movie_service.get_movie_from_history(str(chat_id), movie_id)
     title = (row or {}).get("title", "That movie") if row else "That movie"
 
@@ -205,6 +205,9 @@ async def handle_save(
       2. recommendation_history table (via MovieService)
     If the movie cannot be found in either place, send a friendly stale-state
     message rather than crashing.
+
+    Duplicate check is performed via movie_service.is_in_watchlist() so that
+    handlers never access repository objects directly (spec requirement).
     """
     from services.container import movie_service
 
@@ -248,12 +251,8 @@ async def handle_save(
     movie = MovieModel.from_history_row(movie_dict)
     title = movie.title
 
-    already_saved = (
-        movie_service.watchlist_repo is not None
-        and movie_service.watchlist_repo.is_in_watchlist(
-            str(chat_id), movie_id
-        )
-    )
+    # Duplicate check via MovieService — never access watchlist_repo directly.
+    already_saved = movie_service.is_in_watchlist(str(chat_id), movie_id)
 
     if already_saved:
         msg = f"\U0001f4cc <b>{title}</b> is already in your watchlist!"
