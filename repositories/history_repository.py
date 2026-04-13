@@ -5,10 +5,10 @@ Expected columns:
     chat_id         text  (PK part)
     movie_id        text  (PK part)  — conflict key together with chat_id
     title           text
-    year            text
-    genres          text
-    language        text
-    rating          text
+    year            text  NOT NULL DEFAULT ''
+    genres          text  NOT NULL DEFAULT ''
+    language        text  NOT NULL DEFAULT ''
+    rating          text  NOT NULL DEFAULT ''
     recommended_at  timestamptz
     watched         boolean  default false
     watched_at      timestamptz nullable
@@ -28,9 +28,29 @@ TABLE = "history"
 PAGE_SIZE = 10
 CACHE_TTL = 120  # seconds
 
+# Columns that are NOT NULL DEFAULT '' in the DB schema.
+# If the caller passes None for any of these, Supabase will attempt to
+# insert null and raise a constraint violation.  _coerce_row() converts
+# every None value in this set to an empty string before any DB write.
+_NOT_NULL_TEXT_COLS = frozenset({"year", "genres", "language", "rating", "title"})
+
 
 def _cache_key(chat_id: str, page: int) -> str:
     return f"history:{chat_id}:p{page}"
+
+
+def _coerce_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of *row* with all NOT NULL text columns coerced to ''.
+
+    OMDB often returns "N/A" or omits fields entirely.  Down-stream code
+    sometimes normalises those to None before building the insert payload.
+    This helper ensures we never send null for a NOT NULL column.
+    """
+    coerced = dict(row)
+    for col in _NOT_NULL_TEXT_COLS:
+        if col in coerced and coerced[col] is None:
+            coerced[col] = ""
+    return coerced
 
 
 class HistoryRepository:
@@ -57,6 +77,9 @@ class HistoryRepository:
             row.setdefault("recommended_at", now)
             row.setdefault("watched", False)
             row.setdefault("watched_at", None)
+            # BUG #3 FIX: coerce None → "" for NOT NULL text columns so
+            # Supabase never receives an explicit null for a NOT NULL field.
+            row = _coerce_row(row)
             enriched.append(row)
 
         # Update in-memory store (keyed by movie_id, newest first)
