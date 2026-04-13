@@ -24,22 +24,11 @@ logger = logging.getLogger("feedback_handlers")
 # ---------------------------------------------------------------------------
 
 def _schedule_taste_recompute(chat_id: str) -> None:
-    """Fire-and-forget: recompute taste profile without blocking the handler.
-
-    Uses asyncio.get_running_loop().run_in_executor so the synchronous
-    recompute_taste_profile runs in a thread-pool without blocking the event
-    loop.  Falls back to a direct synchronous call when there is no running
-    loop (e.g. tests or CLI entry-points).
-
-    The deprecated loop-accessor that predates Python 3.10 is intentionally
-    avoided here; get_running_loop() is the correct replacement — it raises
-    RuntimeError when there is no running loop (handled below).
-    """
+    """Fire-and-forget: recompute taste profile without blocking the handler."""
     try:
         loop = asyncio.get_running_loop()
         loop.run_in_executor(None, user_service.recompute_taste_profile, chat_id)
     except RuntimeError:
-        # No running loop (e.g. tests or CLI) — run synchronously inline.
         try:
             user_service.recompute_taste_profile(chat_id)
         except Exception as exc:
@@ -64,7 +53,7 @@ def _resolve_movie_info(
     """
     import json
 
-    # 1. Try session last_recs
+    # 1. Try session last_recs (already plain dicts)
     try:
         last_recs = json.loads((session or {}).get("last_recs_json") or "[]")
         for rec in last_recs:
@@ -73,11 +62,22 @@ def _resolve_movie_info(
     except Exception:
         pass
 
-    # 2. Try history repository
+    # 2. Try history repository.
+    # Fix #6 — get_movie_from_history ALWAYS returns a MovieModel (or None),
+    # never a plain dict.  The old code used a hasattr / dict(row) fallback
+    # that masked the bug and would still fail on a Pydantic model because
+    # dict(model) produces {field: FieldInfo} in Pydantic v2, not field values.
+    # Always call .model_dump() (v2) or .dict() (v1) explicitly.
     try:
         row = movie_service.get_movie_from_history(chat_id, movie_id)
         if row is not None:
-            return row.model_dump() if hasattr(row, "model_dump") else dict(row)
+            if hasattr(row, "model_dump"):   # Pydantic v2
+                return row.model_dump()
+            if hasattr(row, "dict"):         # Pydantic v1
+                return row.dict()
+            # Genuine plain dict (defensive — should not happen with current service)
+            if isinstance(row, dict):
+                return row
     except Exception:
         pass
 
@@ -140,11 +140,7 @@ async def handle_dislike(
     session: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> None:
-    """Handle dislike_{movie_id} callback.
-
-    In addition to logging the reaction, disliked genres are added to
-    user.disliked_genres so the recommendation filter excludes them.
-    """
+    """Handle dislike_{movie_id} callback."""
     movie_id = (input_text or "").replace("dislike_", "", 1).strip()
     if not movie_id:
         if callback_query_id:
@@ -204,11 +200,7 @@ async def handle_min_rating(
     input_text: str = "",
     **kwargs,
 ) -> None:
-    """Handle /min_rating <value> or /rating <value>.
-
-    Valid values: any float in [0, 10].
-    Persists to user.avg_rating_preference and confirms to user.
-    """
+    """Handle /min_rating <value> or /rating <value>."""
     chat_id_str = str(chat_id)
     text = (input_text or "").strip()
 
@@ -218,7 +210,6 @@ async def handle_min_rating(
             text = text[len(prefix):].strip()
             break
     else:
-        # Command sent without argument — prompt the user
         await send_message(
             chat_id,
             "⭐ <b>Set Minimum Rating</b>\n\n"
