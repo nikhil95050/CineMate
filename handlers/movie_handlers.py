@@ -1,4 +1,4 @@
-"""Handlers for recommendation-mode intents: movie, trending, surprise, more_like, more_suggestions."""
+"""Handlers for recommendation-mode intents: movie, search, trending, surprise, more_like, more_suggestions."""
 from __future__ import annotations
 
 import json
@@ -13,9 +13,11 @@ from services.logging_service import get_logger
 
 logger = get_logger("movie_handlers")
 
-# Matches any leading slash-command word so that both '/movie Inception' and
-# 'movie_search Inception' (routed via normalizer) strip correctly.
-_MOVIE_PREFIX_RE = re.compile(r"^/?(?:movie(?:_search)?)\s+", re.IGNORECASE)
+# Matches any leading slash-command word so that '/movie Inception',
+# 'movie_search Inception', and '/search Inception' all strip correctly.
+_MOVIE_PREFIX_RE = re.compile(
+    r"^/?(?:movie(?:_search)?|search)\s+", re.IGNORECASE
+)
 
 
 async def handle_movie(
@@ -25,7 +27,7 @@ async def handle_movie(
     user: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> None:
-    """Handle /movie <title> — similarity recommendations."""
+    """Handle /movie <title> or /search <title> — similarity recommendations."""
     text = input_text.strip()
     match = _MOVIE_PREFIX_RE.match(text)
     seed_title = text[match.end():].strip() if match else ""
@@ -34,7 +36,8 @@ async def handle_movie(
         await send_message(
             chat_id,
             "\U0001f3ac <b>Movie Similarity</b>\n\n"
-            "Please tell me a movie title:\n<code>/movie Inception</code>",
+            "Please tell me a movie title:\n"
+            "<code>/movie Inception</code> or <code>/search Inception</code>",
         )
         return
 

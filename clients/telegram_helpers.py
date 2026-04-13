@@ -2,14 +2,37 @@
 
 BUG #8 FIX: every send_message / edit_message call now stores its final
 text in the worker_service context var so log_interaction is populated.
+
+Also exposes:
+  - BASE_URL   : the raw Telegram Bot API base URL used by telegram_card.py
+                 for direct sendPhoto calls.
+  - show_typing: convenience wrapper around sendChatAction used by handlers.
 """
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 logger = logging.getLogger("telegram_helpers")
 
+# ---------------------------------------------------------------------------
+# BASE_URL — used by telegram_card.py for sendPhoto requests
+# ---------------------------------------------------------------------------
+
+def _get_base_url() -> str:
+    """Return the Telegram Bot API base URL, derived from the bot token."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    return f"https://api.telegram.org/bot{token}"
+
+
+# Lazy property: evaluated once on first import so tests can mock the env var.
+BASE_URL: str = _get_base_url()
+
+
+# ---------------------------------------------------------------------------
+# Internal helper
+# ---------------------------------------------------------------------------
 
 def _record_response(text: str) -> None:
     """Store the last bot response text in the worker context var (best-effort)."""
@@ -19,6 +42,10 @@ def _record_response(text: str) -> None:
     except Exception:
         pass
 
+
+# ---------------------------------------------------------------------------
+# Public send helpers
+# ---------------------------------------------------------------------------
 
 async def send_message(
     chat_id: Any,
@@ -70,6 +97,7 @@ async def answer_callback_query(
     show_alert: bool = False,
     **kwargs,
 ) -> None:
+    """Answer a Telegram callback query (dismisses the loading spinner)."""
     from clients.telegram_client import TelegramClient
     client = TelegramClient.get_instance()
     await client.answer_callback_query(
@@ -78,3 +106,17 @@ async def answer_callback_query(
         show_alert=show_alert,
         **kwargs,
     )
+
+
+async def show_typing(chat_id: Any) -> None:
+    """Send a 'typing…' chat action so the user sees a visual indicator.
+
+    Errors are silently swallowed — a missing typing indicator is never
+    worth crashing a handler over.
+    """
+    try:
+        from clients.telegram_client import TelegramClient
+        client = TelegramClient.get_instance()
+        await client.send_chat_action(chat_id=chat_id, action="typing")
+    except Exception as exc:
+        logger.debug("[show_typing] suppressed error: %s", exc)
