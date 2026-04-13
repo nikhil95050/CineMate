@@ -151,6 +151,21 @@ async def handle_watchlist(
 # watched_* callback
 # ---------------------------------------------------------------------------
 
+def _movie_model_to_dict(obj: Any) -> Optional[Dict[str, Any]]:
+    """Normalise a MovieModel *or* a plain dict to a plain dict, or None."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    # Pydantic v2
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    # Pydantic v1
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    return None
+
+
 async def handle_watched(
     chat_id: Any,
     input_text: str = "",
@@ -170,9 +185,11 @@ async def handle_watched(
 
     success = movie_service.mark_watched(str(chat_id), movie_id)
 
-    # Friendly feedback — resolve title from history if possible.
-    # get_movie_from_history returns a raw dict (or None).
-    row = movie_service.get_movie_from_history(str(chat_id), movie_id)
+    # Fix #1 — get_movie_from_history returns a MovieModel (not a dict).
+    # Normalise to dict before calling .get("title").
+    row = _movie_model_to_dict(
+        movie_service.get_movie_from_history(str(chat_id), movie_id)
+    )
     title = (row or {}).get("title", "That movie") if row else "That movie"
 
     if success:
@@ -232,9 +249,10 @@ async def handle_save(
 
     # --- 2. Fallback: recommendation history ---
     if movie_dict is None:
-        movie_dict = movie_service.get_movie_from_history(
-            str(chat_id), movie_id
-        )
+        # Fix #2 — get_movie_from_history returns a MovieModel, not a raw dict.
+        # Normalise it to a plain dict before passing to MovieModel.from_history_row().
+        raw = movie_service.get_movie_from_history(str(chat_id), movie_id)
+        movie_dict = _movie_model_to_dict(raw)
 
     if movie_dict is None:
         msg = (
