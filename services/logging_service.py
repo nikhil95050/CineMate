@@ -1,6 +1,10 @@
 """Logging service.
 
 BUG #2 FIX: Added log_api_usage() static method — writes to api_usage table.
+BUG #9 FIX: log_api_usage() now guards against chat_id=None being passed
+            explicitly by callers in user-request context, which would violate
+            the NOT NULL constraint on api_usage.chat_id.  Any falsy value
+            (None, empty string, 0) is coerced to the sentinel 'system'.
 BUG #10 FIX: BatchLogger._send() retries once before silently dropping rows.
 """
 import logging
@@ -178,18 +182,30 @@ class LoggingService:
     def log_api_usage(
         provider: str,
         action: str,
-        chat_id: str = "system",
+        chat_id: Optional[str] = None,
         prompt_tokens: Optional[int] = None,
         completion_tokens: Optional[int] = None,
         total_tokens: Optional[int] = None,
     ) -> None:
-        """BUG #2 FIX — write a row to api_usage after every external provider call."""
+        """Write a row to api_usage after every external provider call.
+
+        BUG #9 FIX: The api_usage.chat_id column is NOT NULL with DEFAULT
+        'system'.  When callers pass chat_id=None explicitly (e.g. from
+        background / system contexts), PostgREST would attempt to INSERT null,
+        violating the constraint and raising a 400 error.
+
+        Any falsy value (None, empty string, 0) is now coerced to the 'system'
+        sentinel before the row is written, matching the column's DB default.
+        """
+        # BUG #9 FIX: coerce any falsy chat_id to the 'system' sentinel.
+        safe_chat_id: str = str(chat_id) if chat_id else "system"
+
         try:
             from repositories.api_usage_repository import api_usage_repo
             api_usage_repo.log(
                 provider=provider,
                 action=action,
-                chat_id=chat_id,
+                chat_id=safe_chat_id,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
@@ -244,7 +260,7 @@ class LoggingService:
             "chat_id": str(chat_id),
             "username": username or "",
             "input_text": input_text[:1000] if input_text else "",
-            "bot_response": response_text[:2000] if response_text else "",  # BUG #8 FIX — now populated
+            "bot_response": response_text[:2000] if response_text else "",
             "intent": intent or "unknown",
             "latency_ms": latency_ms,
             "request_id": request_id,
