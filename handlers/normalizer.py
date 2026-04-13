@@ -95,9 +95,11 @@ def detect_intent(input_text: str, session: Optional[Dict[str, Any]] = None) -> 
     if text.startswith("/search"):
         return "search"
 
-    if text in ("trending", "/trending"):
+    # BUG FIX #2: use startswith so /trending@BotName and /trending <args>
+    # are handled correctly, not just the bare exact string.
+    if text.startswith("/trending") or text == "trending":
         return "trending"
-    if text in ("surprise", "/surprise"):
+    if text.startswith("/surprise") or text == "surprise":
         return "surprise"
 
     # Repository-like views
@@ -117,7 +119,10 @@ def detect_intent(input_text: str, session: Optional[Dict[str, Any]] = None) -> 
         return "like"
     if text.startswith("dislike_"):
         return "dislike"
-    if text == "/more_suggestions" or text == "more_suggestions_action":
+
+    # BUG FIX #3: also match plain "more_suggestions" callback data sent by
+    # Telegram inline buttons (no slash prefix, no _action suffix).
+    if text in ("/more_suggestions", "more_suggestions_action", "more_suggestions"):
         return "more_suggestions"
 
     # Questionnaire flow callbacks
@@ -128,9 +133,11 @@ def detect_intent(input_text: str, session: Optional[Dict[str, Any]] = None) -> 
             return "reset"
         return "questioning"
 
-    # Admin commands (kept minimal for now)
+    # BUG FIX #1: admin commands — strip only the leading slash and take the
+    # first word so "/admin_broadcast hello world" → "admin_broadcast", not
+    # the full remaining string which never matches any intent in worker_service.
     if text.startswith("/admin_"):
-        return text.replace("/", "", 1)
+        return text.split()[0].replace("/", "", 1)
 
     # If the session says we are in questioning mode, keep sending to that flow
     if (session or {}).get("session_state") == "questioning":
