@@ -554,7 +554,8 @@ class TestHandleSave:
         mock_answer = AsyncMock()
         mock_svc = MagicMock()
         mock_svc.add_to_watchlist.return_value = True
-        mock_svc.watchlist_repo.is_in_watchlist.return_value = False
+        # Use the service-level method — not watchlist_repo directly
+        mock_svc.is_in_watchlist.return_value = False
 
         with (
             patch("handlers.history_handlers.send_message", mock_send),
@@ -603,7 +604,8 @@ class TestHandleSave:
         mock_send = AsyncMock()
         mock_answer = AsyncMock()
         mock_svc = MagicMock()
-        mock_svc.watchlist_repo.is_in_watchlist.return_value = True
+        # Use the service-level method — not watchlist_repo directly
+        mock_svc.is_in_watchlist.return_value = True
 
         with (
             patch("handlers.history_handlers.send_message", mock_send),
@@ -629,7 +631,8 @@ class TestHandleSave:
         mock_svc = MagicMock()
         mock_svc.get_movie_from_history.return_value = _history_row()
         mock_svc.add_to_watchlist.return_value = True
-        mock_svc.watchlist_repo.is_in_watchlist.return_value = False
+        # Use the service-level method — not watchlist_repo directly
+        mock_svc.is_in_watchlist.return_value = False
 
         with (
             patch("handlers.history_handlers.send_message", mock_send),
