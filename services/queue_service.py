@@ -10,6 +10,37 @@ logger = get_logger("queue")
 
 QUEUE_NAME = os.environ.get("CINEMATE_QUEUE_NAME", "cinemate_intent_jobs")
 
+# ---------------------------------------------------------------------------
+# Production-safety guard
+# ---------------------------------------------------------------------------
+# CINEMATE_INLINE_JOBS is a development convenience that runs background jobs
+# synchronously inside the web process instead of pushing them to RQ.
+#
+# Leaving this flag enabled in a production deployment will:
+#   - Block the webhook response thread for the duration of each job.
+#   - Silently skip Redis/RQ even when both are fully configured.
+#
+# At startup, app_config.get_startup_readiness() checks this flag and emits a
+# WARNING log entry if CINEMATE_ENV=production and CINEMATE_INLINE_JOBS is on.
+# The check is also surfaced here so the warning fires at the first enqueue
+# call if the startup check was somehow bypassed.
+_INLINE_PROD_WARNED = False
+
+
+def _warn_if_inline_in_production() -> None:
+    """Emit a single WARNING if inline mode is active in a production env."""
+    global _INLINE_PROD_WARNED
+    if _INLINE_PROD_WARNED:
+        return
+    env = os.environ.get("CINEMATE_ENV", "").strip().lower()
+    if env in {"production", "prod"}:
+        logger.warning(
+            "[Queue] CINEMATE_INLINE_JOBS is enabled in a PRODUCTION environment. "
+            "Jobs will execute synchronously inside the web process. "
+            "Disable CINEMATE_INLINE_JOBS to restore async RQ processing."
+        )
+        _INLINE_PROD_WARNED = True
+
 
 def _resolve_callable(func_name: str):
     """Resolve a dotted function path like 'services.worker_service.run_intent_job'."""
@@ -49,11 +80,16 @@ def enqueue_job(func_name: str, **kwargs: Any) -> None:
       synchronously via asyncio.run() so test assertions fire immediately.
 
     RQ mode: pushes the job onto the Redis queue for a separate worker process.
+
+    Production safety: if CINEMATE_ENV=production and CINEMATE_INLINE_JOBS is
+    set, a WARNING is logged. Set CINEMATE_INLINE_JOBS=0 (or unset it) to
+    re-enable proper RQ dispatch in production.
     """
     inline_env = os.environ.get("CINEMATE_INLINE_JOBS", "").strip().lower()
     inline_mode = inline_env in {"1", "true", "yes", "on"}
 
     if inline_mode:
+        _warn_if_inline_in_production()
         logger.info(f"[Queue] INLINE mode: scheduling '{func_name}' as asyncio task.")
         _schedule_async_task(func_name, **kwargs)
         return
@@ -68,7 +104,10 @@ def enqueue_job(func_name: str, **kwargs: Any) -> None:
 
     try:
         func = _resolve_callable(func_name)
-        job = queue.enqueue_call(func=func, kwargs=kwargs)
+        # Use queue.enqueue(func, **kwargs) — the modern RQ 1.x+ API.
+        # enqueue_call(func=..., kwargs=...) was deprecated in RQ 1.x and
+        # removed in RQ 2.x; it must not be used on RQ >= 1.0.
+        job = queue.enqueue(func, **kwargs)
         logger.info(
             "[Queue] Enqueued '%s' for chat_id=%s as job_id=%s",
             func_name,
@@ -92,13 +131,7 @@ def _schedule_async_task(func_name: str, **kwargs: Any) -> None:
       This ensures monkeypatched fakes are called before test assertions run.
     """
     try:
-        # asyncio.get_running_loop() raises RuntimeError if no loop is running.
-        # This is the modern replacement for get_event_loop() (no deprecation warning).
         loop = asyncio.get_running_loop()
-        # We are inside a running event loop (FastAPI / uvicorn).
-        # Schedule as a non-blocking background task.
         loop.create_task(_run_inline_async(func_name, **kwargs))
     except RuntimeError:
-        # No running event loop — we are in a unit test or synchronous script.
-        # Call synchronously so the fake/mock is executed before assertions.
         asyncio.run(_run_inline_async(func_name, **kwargs))
