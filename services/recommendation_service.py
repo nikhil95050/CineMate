@@ -103,7 +103,7 @@ class RecommendationService:
             chat_id=chat_id or "system",
         )
 
-        # BUG #1 FIX — write history rows after enrichment
+        # Write history rows after enrichment
         if chat_id and enriched:
             try:
                 from services.container import movie_service  # deferred to avoid import cycles
@@ -112,13 +112,17 @@ class RecommendationService:
             except Exception as hist_exc:
                 logger.warning("[RecService] history write failed: %s", hist_exc)
 
-        # Persist session state
+        # Fix #12: mutate the *session* passed in rather than fetching a fresh
+        # one from the DB. A fresh fetch loses any sim_depth increment (or other
+        # in-flight state changes) the caller applied before invoking this method.
         if chat_id and session is not None:
             from services.container import session_service  # deferred to avoid import cycles
-            session_model = session_service.get_session(chat_id)
-            session_model.last_recs_json = json.dumps([m.model_dump() for m in enriched])
-            session_model.overflow_buffer_json = json.dumps([m.model_dump() for m in overflow])
-            session_service.upsert_session(session_model)
+            # Fix #16: use model_dump(mode='json') so nested Pydantic objects
+            # (e.g. StreamingInfo) are serialised to plain dicts/scalars, making
+            # the JSON string safe to round-trip through MovieModel(**m) later.
+            session.last_recs_json = json.dumps([m.model_dump(mode="json") for m in enriched])
+            session.overflow_buffer_json = json.dumps([m.model_dump(mode="json") for m in overflow])
+            session_service.upsert_session(session)
 
         if overflow:
             task = asyncio.create_task(
@@ -127,7 +131,7 @@ class RecommendationService:
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
 
-        return [m.model_dump() for m in enriched]
+        return [m.model_dump(mode="json") for m in enriched]
 
     async def get_more_suggestions(
         self,
@@ -145,12 +149,15 @@ class RecommendationService:
         if overflow:
             batch = overflow[:BATCH_SIZE]
             rest = overflow[BATCH_SIZE:]
+
+            # Fix #16: overflow dicts were stored via model_dump(mode='json') so
+            # all values are plain JSON scalars. MovieModel(**m) rehydrates safely.
             enriched = await self._enrichment.enrich_movies(
                 [MovieModel(**m) for m in batch],
                 chat_id=chat_id or "system",
             )
 
-            # BUG #1 FIX — also write history for overflow batch
+            # Write history for overflow batch
             if chat_id and enriched:
                 try:
                     from services.container import movie_service
@@ -160,16 +167,16 @@ class RecommendationService:
                 except Exception as hist_exc:
                     logger.warning("[RecService] overflow history write failed: %s", hist_exc)
 
+            # Fix #12: same pattern — mutate the passed-in session, do not re-fetch.
             if chat_id and session is not None:
-                session_model = session_service.get_session(chat_id)
-                new_last = _parse_json_list(session_model.last_recs_json) + [
-                    m.model_dump() for m in enriched
+                new_last = _parse_json_list(session.last_recs_json) + [
+                    m.model_dump(mode="json") for m in enriched
                 ]
-                session_model.last_recs_json = json.dumps(new_last[-20:])
-                session_model.overflow_buffer_json = json.dumps(rest)
-                session_service.upsert_session(session_model)
+                session.last_recs_json = json.dumps(new_last[-20:])
+                session.overflow_buffer_json = json.dumps(rest)
+                session_service.upsert_session(session)
 
-            return [m.model_dump() for m in enriched]
+            return [m.model_dump(mode="json") for m in enriched]
 
         return await self.get_recommendations(
             session, user, mode="trending", chat_id=chat_id, request_id=request_id
