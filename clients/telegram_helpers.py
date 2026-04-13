@@ -5,9 +5,10 @@ so a failed Telegram call never crashes the bot logic.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import httpx
 
@@ -45,6 +46,30 @@ async def send_message(
     if reply_markup:
         payload["reply_markup"] = reply_markup
     return await _post("sendMessage", payload)
+
+
+async def send_message_with_keyboard(
+    chat_id: Any,
+    text: str,
+    reply_markup: Union[str, Dict[str, Any], None] = None,
+    parse_mode: str = "HTML",
+) -> Optional[Dict]:
+    """Send a message with an inline keyboard.
+
+    ``reply_markup`` may be passed as either a pre-serialised JSON string
+    (as broadcast_handlers builds it) or as a plain dict.  Both forms are
+    accepted so callers never need to care about serialisation.
+    """
+    markup: Optional[Dict[str, Any]] = None
+    if isinstance(reply_markup, str):
+        try:
+            markup = json.loads(reply_markup)
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("[TG] send_message_with_keyboard: invalid JSON markup: %s", exc)
+    elif isinstance(reply_markup, dict):
+        markup = reply_markup
+
+    return await send_message(chat_id, text, reply_markup=markup, parse_mode=parse_mode)
 
 
 async def send_message_safely(
