@@ -13,9 +13,14 @@ from services.logging_service import get_logger
 
 logger = get_logger("movie_handlers")
 
-# Matches any leading slash-command word so that both '/movie Inception' and
-# 'movie_search Inception' (routed via normalizer) strip correctly.
-_MOVIE_PREFIX_RE = re.compile(r"^/?(?:movie(?:_search)?)\s+", re.IGNORECASE)
+# Matches any leading slash-command word so that '/movie Inception',
+# 'movie_search Inception', '/search Inception' and 'search Inception'
+# (all routed to handle_movie by worker_service) strip correctly.
+# Fix #6: added 'search' as an additional recognised prefix so that the
+# full '/search <query>' string is never passed as the seed_title to the LLM.
+_MOVIE_PREFIX_RE = re.compile(
+    r"^/?(?:search|movie(?:_search)?)\s+", re.IGNORECASE
+)
 
 
 async def handle_movie(
@@ -25,7 +30,7 @@ async def handle_movie(
     user: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> None:
-    """Handle /movie <title> — similarity recommendations."""
+    """Handle /movie <title> or /search <title> — similarity recommendations."""
     text = input_text.strip()
     match = _MOVIE_PREFIX_RE.match(text)
     seed_title = text[match.end():].strip() if match else ""
@@ -34,7 +39,8 @@ async def handle_movie(
         await send_message(
             chat_id,
             "\U0001f3ac <b>Movie Similarity</b>\n\n"
-            "Please tell me a movie title:\n<code>/movie Inception</code>",
+            "Please tell me a movie title:\n<code>/movie Inception</code>\n"
+            "or: <code>/search Parasite</code>",
         )
         return
 
