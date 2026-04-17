@@ -276,7 +276,7 @@ async def _enrich_with_omdb(
 ) -> MovieModel:
     _repo = repo or _metadata_repo
     try:
-        data = await omdb_client.get_by_title(movie.title, movie.year)
+        data = await omdb_client.get_by_title(movie.title, movie.year, chat_id=chat_id)
         if not data:
             return movie
 
@@ -385,7 +385,8 @@ class DiscoveryService:
             messages=[
                 {"role": "system", "content": _build_system_prompt()},
                 {"role": "user", "content": prompt},
-            ]
+            ],
+            chat_id=chat_id,
         )
 
         if not raw:
@@ -453,7 +454,8 @@ class DiscoveryService:
             messages=[
                 {"role": "system", "content": _build_system_prompt()},
                 {"role": "user", "content": prompt},
-            ]
+            ],
+            chat_id=chat_id,
         )
 
         if not raw:
