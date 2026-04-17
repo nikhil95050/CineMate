@@ -162,7 +162,7 @@ class MovieService:
             if not rows:
                 return None
             row = random.choice(rows)
-            return MovieModel.from_history_row(row)  # reusing generic row mapper
+            return MovieModel.from_history_row(row)
         except Exception as exc:
             logger.warning(
                 "[MovieService] get_random_watchlist_reminder failed: %s", exc
