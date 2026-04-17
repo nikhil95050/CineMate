@@ -8,10 +8,8 @@ BUG-ADM-1 FIX: get_recent_errors() was passing unsupported `order_by` and
                only accepts an `order` string param (PostgREST format:
                "column.desc").  Fixed to use order="timestamp.desc".
 
-BUG-ADM-2 FIX: get_all_stats() and increment_stat() were using the wrong
-               column names (`metric_name` / `metric_value`).  The live DB
-               schema defines `stat_name` / `stat_value`.  Both methods now
-               use the correct column names.
+Your live bot_stats schema uses metric_name / metric_value, so reads and
+upserts must target those columns.
 """
 from __future__ import annotations
 
@@ -131,16 +129,15 @@ class AdminRepository:
     # ------------------------------------------------------------------
 
     def get_all_stats(self) -> Dict[str, int]:
-        """BUG-ADM-2 FIX: use stat_name / stat_value (live DB column names)."""
         if sb.is_configured():
             try:
                 res, err = sb.select_rows("bot_stats", limit=200)
                 if err:
                     return {}
                 return {
-                    row["stat_name"]: int(row["stat_value"])
+                    row["metric_name"]: int(row["metric_value"])
                     for row in (res or [])
-                    if "stat_name" in row
+                    if "metric_name" in row
                 }
             except Exception as exc:
                 logger.warning("[AdminRepo] get_all_stats exception: %s", exc)
@@ -148,18 +145,14 @@ class AdminRepository:
         return dict(_stats_store)
 
     def increment_stat(self, stat_name: str, by: int = 1) -> None:
-        """BUG-ADM-2 FIX: use stat_name / stat_value (live DB column names).
-
-        Uses an upsert so the row is created automatically if it does not
-        exist yet (e.g. after a fresh deployment before bot_stats is seeded).
-        """
+        """Upsert a metric_name / metric_value pair in bot_stats."""
         if sb.is_configured():
             try:
                 existing = self.get_all_stats().get(stat_name, 0)
                 sb.upsert_rows(
                     "bot_stats",
-                    [{"stat_name": stat_name, "stat_value": existing + by}],
-                    on_conflict="stat_name",
+                    [{"metric_name": stat_name, "metric_value": existing + by}],
+                    on_conflict="metric_name",
                 )
             except Exception as exc:
                 logger.warning("[AdminRepo] increment_stat exception: %s", exc)
