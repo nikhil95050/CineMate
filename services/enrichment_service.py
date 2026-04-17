@@ -122,7 +122,10 @@ class EnrichmentService:
         # Streaming: only call Watchmode when we have a real IMDb ID
         if not movie.streaming and movie.movie_id.startswith("tt"):
             try:
-                sources = await watchmode_client.get_streaming_sources(movie.movie_id)
+                sources = await watchmode_client.get_streaming_sources(
+                    movie.movie_id,
+                    chat_id=chat_id,
+                )
                 summary = watchmode_client.format_streaming_summary(sources)
 
                 if summary:
@@ -130,9 +133,10 @@ class EnrichmentService:
                     # --- Write-through cache: persist raw sources to movie_metadata ---
                     # Fire-and-forget so it never delays the user response.
                     # We hold a reference in _background_tasks to prevent GC.
-                    task = asyncio.create_task(
-                        self._persist_streaming(movie.movie_id, sources)
-                    )
+                    persist_coro = self._persist_streaming(movie.movie_id, sources)
+                    task = asyncio.ensure_future(persist_coro)
+                    if not asyncio.isfuture(task):
+                        persist_coro.close()
                     _background_tasks.add(task)
                     task.add_done_callback(_background_tasks.discard)
                 else:
