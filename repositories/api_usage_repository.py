@@ -62,8 +62,7 @@ class ApiUsageRepository:
             try:
                 res, err = sb.select_rows(
                     TABLE,
-                    order_by="timestamp",
-                    order_desc=True,
+                    order="timestamp.desc",
                     limit=limit,
                 )
                 return res or []
