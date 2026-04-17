@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from services.logging_service import get_logger, error_batcher
+from services.logging_service import LoggingService, get_logger, error_batcher
 from utils.time_utils import utc_now_iso
 
 logger = get_logger("omdb")
@@ -33,7 +33,11 @@ def _health():
         return None
 
 
-async def get_by_title(title: str, year: Optional[str] = None) -> Optional[Dict[str, Any]]:
+async def get_by_title(
+    title: str,
+    year: Optional[str] = None,
+    chat_id: str = "system",
+) -> Optional[Dict[str, Any]]:
     """Fetch a single movie by title (and optional year) from OMDb."""
     api_key = _api_key()
     if not api_key:
@@ -56,6 +60,11 @@ async def get_by_title(title: str, year: Optional[str] = None) -> Optional[Dict[
                 if hs is not None:
                     hs.report_success(PROVIDER_NAME)
                     hs.increment_daily_calls(PROVIDER_NAME)
+                LoggingService.log_api_usage(
+                    provider=PROVIDER_NAME,
+                    action="get_by_title",
+                    chat_id=chat_id,
+                )
                 return data
             logger.debug("OMDb no result for %r: %s", title, data.get("Error"))
             # A "False" response is a data-not-found, not a provider failure
@@ -77,7 +86,7 @@ async def get_by_title(title: str, year: Optional[str] = None) -> Optional[Dict[
         return None
 
 
-async def get_by_imdb_id(imdb_id: str) -> Optional[Dict[str, Any]]:
+async def get_by_imdb_id(imdb_id: str, chat_id: str = "system") -> Optional[Dict[str, Any]]:
     """Fetch a single movie by IMDb ID from OMDb."""
     api_key = _api_key()
     if not api_key or not imdb_id:
@@ -96,6 +105,11 @@ async def get_by_imdb_id(imdb_id: str) -> Optional[Dict[str, Any]]:
                 if hs is not None:
                     hs.report_success(PROVIDER_NAME)
                     hs.increment_daily_calls(PROVIDER_NAME)
+                LoggingService.log_api_usage(
+                    provider=PROVIDER_NAME,
+                    action="get_by_imdb_id",
+                    chat_id=chat_id,
+                )
                 return data
     except Exception as exc:
         logger.error("OMDb request failed for %r: %s", imdb_id, exc)
