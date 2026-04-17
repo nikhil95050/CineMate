@@ -145,13 +145,13 @@ async def handle_more_like(
     await show_typing(chat_id)
     await send_message(chat_id, f"\U0001f3af Finding movies like <b>{seed_title}</b>\u2026")
 
-    # Exclude all previously-seen titles EXCEPT the seed movie itself.
+    # Exclude all previously-seen titles, including the seed title.
     seen_titles: list = []
     try:
         seen_titles = [
             r.get("title", "")
             for r in last_recs_raw
-            if r.get("title") and r.get("title") != seed_title
+            if r.get("title")
         ]
     except Exception:
         pass
