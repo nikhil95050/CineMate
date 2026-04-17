@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from services.logging_service import get_logger
+from services.logging_service import LoggingService, get_logger
 
 logger = get_logger("watchmode")
 
@@ -33,7 +33,7 @@ def _health():
         return None
 
 
-async def get_streaming_sources(imdb_id: str) -> List[Dict[str, Any]]:
+async def get_streaming_sources(imdb_id: str, chat_id: str = "system") -> List[Dict[str, Any]]:
     """Return a list of streaming source dicts for a given IMDb ID.
 
     Returns an empty list when the key is absent, the circuit is open, or
@@ -79,6 +79,11 @@ async def get_streaming_sources(imdb_id: str) -> List[Dict[str, Any]]:
         if hs is not None:
             hs.report_success(PROVIDER_NAME)
             hs.increment_daily_calls(PROVIDER_NAME)
+        LoggingService.log_api_usage(
+            provider=PROVIDER_NAME,
+            action="get_streaming_sources",
+            chat_id=chat_id,
+        )
         return sources
 
     except Exception as exc:
