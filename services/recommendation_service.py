@@ -66,10 +66,13 @@ class RecommendationService:
         last_recs = _parse_json_list(session.last_recs_json) if session is not None else []
         excluded_ids = {str(r.get("movie_id", "")) for r in last_recs if r.get("movie_id")}
         excluded_titles = {str(r.get("title", "")).lower() for r in last_recs if r.get("title")}
+        extra_seen_titles = {
+            str(title).lower() for title in (kwargs.get("seen_titles") or []) if str(title).strip()
+        }
 
         min_rating = self._resolve_min_rating(session, user) if session is not None else None
 
-        seen_titles = list(excluded_titles)
+        seen_titles = list(excluded_titles | extra_seen_titles)
         candidates = await self._discovery.discover(
             mode=mode,
             session=session,
