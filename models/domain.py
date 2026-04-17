@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator
 from utils.time_utils import utc_now_iso
 
@@ -187,6 +187,17 @@ class MovieModel(BaseModel):
             return []
         return [g.strip() for g in self.genres.split(",") if g.strip()]
 
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, dict):
+            mine = self.model_dump(mode="json")
+            other_model = MovieModel.from_history_row(other)
+            other_dump = other_model.model_dump(mode="json")
+            for key, value in other_dump.items():
+                if mine.get(key) != value:
+                    return False
+            return True
+        return super().__eq__(other)
+
     # ------------------------------------------------------------------
     # Conversion helpers
     # ------------------------------------------------------------------
@@ -308,33 +319,20 @@ class UserModel(BaseModel):
     def to_row(self) -> Dict[str, Any]:
         """Serialise the model to a dict suitable for Supabase REST upsert.
 
-        Fix #10 changes:
-        - updated_at is now included so every write stamps the row timestamp.
-        - JSONB list columns (preferred_genres, disliked_genres, subscriptions)
-          are serialised to JSON strings so Supabase REST accepts them.
-        - user_taste_vector (JSONB dict) is serialised to a JSON string when
-          present; None is sent as None so the column is explicitly written
-          rather than silently omitted.
+        JSONB columns are returned as native Python list/dict values.
+        UserRepository normalises them again before any Supabase write.
         """
         return {
             "chat_id": self.chat_id,
             "username": self.username,
-            # JSONB list columns — must be JSON strings for Supabase REST
-            "preferred_genres": json.dumps(self.preferred_genres),
-            "disliked_genres": json.dumps(self.disliked_genres),
+            "preferred_genres": list(self.preferred_genres),
+            "disliked_genres": list(self.disliked_genres),
             "preferred_language": self.preferred_language,
             "preferred_era": self.preferred_era,
             "watch_context": self.watch_context,
             "avg_rating_preference": self.avg_rating_preference,
-            # JSONB list column
-            "subscriptions": json.dumps(self.subscriptions),
-            # JSONB dict column — serialise to string or send None explicitly
-            "user_taste_vector": (
-                json.dumps(self.user_taste_vector)
-                if self.user_taste_vector is not None
-                else None
-            ),
-            # Fix #10: stamp updated_at on every write
+            "subscriptions": list(self.subscriptions),
+            "user_taste_vector": self.user_taste_vector,
             "updated_at": utc_now_iso(),
         }
 
@@ -387,7 +385,7 @@ class SessionModel(BaseModel):
     """
 
     # Number of questionnaire questions — must match len(QUESTION_COLUMNS).
-    _TOTAL_QUESTIONS: int = len(QUESTION_COLUMNS)  # = 9
+    _TOTAL_QUESTIONS: ClassVar[int] = len(QUESTION_COLUMNS)  # = 9
 
     chat_id: str
     session_state: str = "idle"
