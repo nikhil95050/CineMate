@@ -1,230 +1,258 @@
-"""Handlers for /history, /watched, and /clear_history commands.
-
-Fixes applied
--------------
-#3  /watched command silently failed because the handler called
-    history_repo.add_movie() instead of history_repo.mark_watched().  →  Use
-    the correct mark_watched(chat_id, movie_id) call.
-#4  /history displayed raw JSON stored in the DB column (last_recs_json)
-    instead of the structured history rows.  →  Call
-    history_repo.get_history(chat_id) and render a human-readable list.
-"""
+"""History, watchlist, save, and watched handlers."""
 from __future__ import annotations
 
-import logging
-from typing import Any, Optional
+import json
+from typing import Any, Dict, List, Optional
 
-from clients.telegram_helpers import send_message
-from services.container import history_repo
+from clients.telegram_helpers import (
+    answer_callback_query,
+    edit_message as edit_message_text,
+    send_message,
+)
+from models.domain import MovieModel
+import services.container as container
+from services.logging_service import get_logger
+from utils.formatters import format_history_list, format_watchlist_list
 
-logger = logging.getLogger("history_handlers")
-
-# Maximum entries shown without pagination
-_PAGE_SIZE = 10
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _render_history_row(row: Any, index: int) -> str:
-    """Format a single history row (dict or model) as an HTML line."""
-    if hasattr(row, "model_dump"):
-        row = row.model_dump()
-    elif hasattr(row, "dict"):
-        row = row.dict()
-
-    title   = row.get("title") or "Unknown"
-    year    = row.get("year") or ""
-    rating  = row.get("rating") or ""
-    genres  = row.get("genres") or ""
-    watched = row.get("watched", False)
-
-    status = "✅" if watched else "🟡"
-    line = f"{index}. {status} <b>{title}</b>"
-    if year:
-        line += f" ({year})"
-    meta = []
-    if rating:
-        meta.append(f"⭐ {rating}")
-    if genres:
-        meta.append(genres)
-    if meta:
-        line += "  —  " + " | ".join(meta)
-    return line
+logger = get_logger("history_handlers")
 
 
-# ---------------------------------------------------------------------------
-# /history
-# ---------------------------------------------------------------------------
+def _pagination_keyboard(prefix: str, page: int, total_pages: int) -> Optional[Dict[str, Any]]:
+    if total_pages <= 1:
+        return None
+
+    row: List[Dict[str, str]] = []
+    if page > 1:
+        row.append({"text": "◀ Prev", "callback_data": f"{prefix}_p{page - 1}"})
+    row.append({"text": f"{page}/{total_pages}", "callback_data": f"{prefix}_p{page}"})
+    if page < total_pages:
+        row.append({"text": "Next ▶", "callback_data": f"{prefix}_p{page + 1}"})
+    return {"inline_keyboard": [row]}
+
+
+def _parse_page(input_text: str, prefix: str) -> int:
+    text = (input_text or "").strip().lower()
+    token = f"{prefix}_p"
+    if text.startswith(token):
+        try:
+            return max(1, int(text.split("_p", 1)[1]))
+        except (IndexError, ValueError):
+            return 1
+    return 1
+
+
+def _movie_from_last_recs(
+    chat_id: str,
+    movie_id: str,
+    session_row: Optional[Dict[str, Any]] = None,
+) -> Optional[MovieModel]:
+    try:
+        if session_row is not None:
+            recs = json.loads((session_row or {}).get("last_recs_json") or "[]")
+        else:
+            session_model = container.session_service.get_session(chat_id)
+            recs = json.loads(session_model.last_recs_json or "[]")
+        for rec in recs:
+            if str(rec.get("movie_id", "")) == movie_id:
+                return MovieModel(**rec)
+    except Exception as exc:
+        logger.debug("last_recs lookup failed for %s/%s: %s", chat_id, movie_id, exc)
+    return None
+
+
+def _resolve_movie(
+    chat_id: str,
+    movie_id: str,
+    session_row: Optional[Dict[str, Any]] = None,
+) -> Optional[MovieModel]:
+    movie = _movie_from_last_recs(chat_id, movie_id, session_row=session_row)
+    if movie is not None:
+        return movie
+    row = container.movie_service.get_movie_from_history(chat_id, movie_id)
+    if row is None:
+        return None
+    if isinstance(row, MovieModel):
+        return row
+    if isinstance(row, dict):
+        try:
+            return MovieModel(**row)
+        except Exception:
+            return MovieModel.from_history_row(row)
+    return None
+
+
+async def _render_list(
+    chat_id: Any,
+    text: str,
+    keyboard: Optional[Dict[str, Any]],
+    callback_query_id: Optional[str] = None,
+    message_id: Optional[int] = None,
+) -> None:
+    if callback_query_id:
+        await answer_callback_query(callback_query_id)
+
+    if message_id is not None and callback_query_id:
+        try:
+            await edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=keyboard,
+            )
+            return
+        except Exception as exc:
+            logger.debug("edit_message fallback to send_message: %s", exc)
+
+    await send_message(chat_id, text, reply_markup=keyboard)
+
 
 async def handle_history(
     chat_id: Any,
     input_text: str = "",
+    message_id: Optional[int] = None,
+    callback_query_id: Optional[str] = None,
     **kwargs,
 ) -> None:
-    """Show the user's recommendation history.
+    page = _parse_page(input_text, "history")
+    rows = container.movie_service.get_history(str(chat_id), page=page)
+    total_pages = container.movie_service.get_history_page_count(str(chat_id))
 
-    Fix #4 — previously returned raw JSON from the session column.  Now
-    correctly fetches structured rows from the history table.
-    """
+    text = format_history_list(rows, page=page, total_pages=total_pages)
+    keyboard = _pagination_keyboard("history", page, total_pages)
+    await _render_list(
+        chat_id=chat_id,
+        text=text,
+        keyboard=keyboard,
+        callback_query_id=callback_query_id,
+        message_id=message_id,
+    )
+
+
+async def handle_watchlist(
+    chat_id: Any,
+    input_text: str = "",
+    message_id: Optional[int] = None,
+    callback_query_id: Optional[str] = None,
+    **kwargs,
+) -> None:
+    page = _parse_page(input_text, "watchlist")
+    rows = container.movie_service.get_watchlist(str(chat_id), page=page)
+    total_pages = container.movie_service.get_watchlist_page_count(str(chat_id))
+
+    text = format_watchlist_list(rows, page=page, total_pages=total_pages)
+    keyboard = _pagination_keyboard("watchlist", page, total_pages)
+    await _render_list(
+        chat_id=chat_id,
+        text=text,
+        keyboard=keyboard,
+        callback_query_id=callback_query_id,
+        message_id=message_id,
+    )
+
+
+async def handle_save(
+    chat_id: Any,
+    input_text: str = "",
+    callback_query_id: Optional[str] = None,
+    session: Optional[Dict[str, Any]] = None,
+    **kwargs,
+) -> None:
+    movie_id = (input_text or "").replace("save_", "", 1).strip()
+    if not movie_id:
+        if callback_query_id:
+            await answer_callback_query(callback_query_id, text="Invalid movie ID.")
+        return
+
     chat_id_str = str(chat_id)
-
-    try:
-        rows = history_repo.get_history(chat_id_str)  # returns list[HistoryModel | dict]
-    except Exception as exc:
-        logger.error("[handle_history] get_history failed: %s", exc)
-        await send_message(
-            chat_id,
-            "⚠️ Couldn't load your history right now. Please try again later.",
-        )
+    movie = _resolve_movie(chat_id_str, movie_id, session_row=session)
+    if movie is None:
+        if callback_query_id:
+            await answer_callback_query(callback_query_id, text="Movie not found.")
+        await send_message(chat_id, "I couldn't find that movie in your recent recommendations.")
         return
 
-    if not rows:
-        await send_message(
-            chat_id,
-            "📂 <b>No history yet!</b>\n\n"
-            "Start by using /recommend — recommended movies appear here automatically.",
-        )
+    if container.movie_service.is_in_watchlist(chat_id_str, movie.movie_id):
+        if callback_query_id:
+            await answer_callback_query(callback_query_id, text="Already saved.")
+        await send_message(chat_id, f"💾 <b>{movie.title}</b> is already in your watchlist.")
         return
 
-    # Render up to _PAGE_SIZE entries (most recent first)
-    recent = list(rows)[-_PAGE_SIZE:]
-    lines  = ["📜 <b>Your recommendation history</b>\n"]
-    for i, row in enumerate(recent, 1):
-        lines.append(_render_history_row(row, i))
-
-    total = len(rows)
-    if total > _PAGE_SIZE:
-        lines.append(
-            f"\n<i>Showing last {_PAGE_SIZE} of {total} entries. "
-            "Use /clear_history to start fresh.</i>"
+    saved = container.movie_service.add_to_watchlist(chat_id_str, movie)
+    if callback_query_id:
+        await answer_callback_query(
+            callback_query_id,
+            text="Saved to watchlist." if saved else "Could not save movie.",
         )
+
+    if saved:
+        await send_message(chat_id, f"💾 Saved <b>{movie.title}</b> to your watchlist.")
     else:
-        lines.append(
-            "\n<i>✅ = watched  🟡 = not watched yet.  "
-            "Use /watched &lt;movie_title&gt; to mark as watched.</i>"
-        )
+        await send_message(chat_id, "⚠️ I couldn't save that movie right now. Please try again.")
 
-    await send_message(chat_id, "\n".join(lines))
-
-
-# ---------------------------------------------------------------------------
-# /watched
-# ---------------------------------------------------------------------------
 
 async def handle_watched(
     chat_id: Any,
     input_text: str = "",
+    callback_query_id: Optional[str] = None,
     **kwargs,
 ) -> None:
-    """Mark a movie as watched by title substring or movie_id.
-
-    Fix #3 — previously called history_repo.add_movie() which is the
-    insert-new-entry path, not the mark-watched path.  Now calls
-    history_repo.mark_watched(chat_id, movie_id).
-    """
     chat_id_str = str(chat_id)
     text = (input_text or "").strip()
+    movie_id = ""
+    movie_title = ""
 
-    # Strip command prefix
-    for prefix in ("/watched ", "watched "):
-        if text.lower().startswith(prefix):
-            text = text[len(prefix):].strip()
-            break
+    if text.startswith("watched_"):
+        movie_id = text.replace("watched_", "", 1).strip()
     else:
+        for prefix in ("/watched ", "watched "):
+            if text.lower().startswith(prefix):
+                query = text[len(prefix) :].strip().lower()
+                total_pages = container.movie_service.get_history_page_count(chat_id_str)
+                for page in range(1, total_pages + 1):
+                    for row in container.movie_service.get_history(chat_id_str, page=page):
+                        title = str(row.get("title") or "")
+                        if query == str(row.get("movie_id", "")).lower() or query in title.lower():
+                            movie_id = str(row.get("movie_id", ""))
+                            movie_title = title
+                            break
+                    if movie_id:
+                        break
+                break
+
+    if not movie_id:
+        if callback_query_id:
+            await answer_callback_query(callback_query_id, text="Invalid movie ID.")
         await send_message(
             chat_id,
-            "✅ <b>Mark as Watched</b>\n\n"
-            "Usage: <code>/watched &lt;movie title or ID&gt;</code>\n"
-            "Example: <code>/watched Inception</code>",
+            "✅ Use <code>/watched Movie Title</code> or tap the Watched button on a card.",
         )
         return
 
-    if not text:
+    movie = _resolve_movie(chat_id_str, movie_id)
+    if movie is not None:
+        movie_title = movie.title
+
+    updated = container.movie_service.mark_watched(chat_id_str, movie_id)
+    if callback_query_id:
+        await answer_callback_query(
+            callback_query_id,
+            text="Marked as watched." if updated else "Could not update watch status.",
+        )
+
+    if updated:
         await send_message(
             chat_id,
-            "⚠️ Please provide a movie title or ID.\n"
-            "Example: <code>/watched The Dark Knight</code>",
+            f"✔ <b>{movie_title or movie_id}</b> marked as watched!",
         )
-        return
+    else:
+        await send_message(chat_id, "⚠️ I couldn't update that movie right now. Please try again.")
 
-    # Try to find the movie_id from the user's history
-    try:
-        rows = history_repo.get_history(chat_id_str)
-    except Exception as exc:
-        logger.error("[handle_watched] get_history failed: %s", exc)
-        rows = []
-
-    matched_id: Optional[str] = None
-    matched_title: str = text
-
-    for row in (rows or []):
-        if hasattr(row, "model_dump"):
-            d = row.model_dump()
-        elif hasattr(row, "dict"):
-            d = row.dict()
-        else:
-            d = row if isinstance(row, dict) else {}
-
-        row_id    = str(d.get("movie_id", ""))
-        row_title = str(d.get("title", "")).lower()
-
-        if row_id == text or text.lower() in row_title:
-            matched_id    = row_id
-            matched_title = d.get("title") or text
-            break
-
-    if not matched_id:
-        await send_message(
-            chat_id,
-            f"⚠️ Could not find <b>{text}</b> in your history.\n"
-            "Use /history to see your recommended movies first.",
-        )
-        return
-
-    # Fix #3 — call mark_watched, not add_movie
-    try:
-        history_repo.mark_watched(chat_id_str, matched_id)
-    except Exception as exc:
-        logger.error("[handle_watched] mark_watched failed: %s", exc)
-        await send_message(
-            chat_id,
-            "⚠️ Couldn't update your watch status right now. Please try again.",
-        )
-        return
-
-    await send_message(
-        chat_id,
-        f"✅ <b>{matched_title}</b> marked as watched!\n"
-        "Use /history to see your full list.",
-    )
-
-
-# ---------------------------------------------------------------------------
-# /clear_history
-# ---------------------------------------------------------------------------
 
 async def handle_clear_history(
     chat_id: Any,
-    input_text: str = "",
     **kwargs,
 ) -> None:
-    """Delete all history entries for the user."""
-    chat_id_str = str(chat_id)
-
-    try:
-        history_repo.clear_history(chat_id_str)
-    except Exception as exc:
-        logger.error("[handle_clear_history] clear_history failed: %s", exc)
-        await send_message(
-            chat_id,
-            "⚠️ Couldn't clear your history right now. Please try again later.",
-        )
-        return
-
     await send_message(
         chat_id,
-        "🗑️ Your recommendation history has been cleared.\n"
-        "Use /recommend to start fresh!",
+        "ℹ️ History clearing isn't available in this build yet. Use /reset to start a fresh question flow.",
     )
