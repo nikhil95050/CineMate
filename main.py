@@ -200,6 +200,12 @@ async def telegram_webhook(token: str, request: Request):
     if not BOT_TOKEN or token != BOT_TOKEN:
         raise HTTPException(status_code=404, detail="Not found")
 
+    secret_token = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    if secret_token:
+        request_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        if request_secret != secret_token:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
     try:
         update = await request.json()
     except Exception:

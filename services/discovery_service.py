@@ -25,6 +25,7 @@ supabase_client = _config.supabase_client
 
 from models.domain import MovieModel, SessionModel, UserModel
 from repositories.movie_metadata_repository import MovieMetadataRepository
+from services.container import movie_metadata_repo
 from services.logging_service import get_logger, error_batcher
 from utils.time_utils import utc_now_iso
 
@@ -32,7 +33,7 @@ logger = get_logger("discovery")
 
 _LLM_CANDIDATE_COUNT = 14
 
-_metadata_repo = MovieMetadataRepository()
+_metadata_repo = movie_metadata_repo
 
 
 # ---------------------------------------------------------------------------
@@ -301,8 +302,9 @@ async def _enrich_with_omdb(
             }
         )
 
-        asyncio.ensure_future(
-            _repo.upsert(imdb_id, data)
+        task = asyncio.create_task(_repo.upsert(imdb_id, data))
+        task.add_done_callback(
+            lambda t: t.exception() and logger.error("Upsert failed for %s: %s", imdb_id, t.exception())
         )
 
         return enriched

@@ -7,6 +7,7 @@ Integrates with HealthService for circuit-breaker protection:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Dict, List, Optional
 
@@ -44,9 +45,11 @@ async def get_streaming_sources(imdb_id: str, chat_id: str = "system") -> List[D
         return []
 
     hs = _health()
-    if hs is not None and not hs.is_healthy(PROVIDER_NAME):
-        logger.warning("[watchmode_client] circuit OPEN – call skipped")
-        return []
+    if hs is not None:
+        is_healthy = await asyncio.to_thread(hs.is_healthy, PROVIDER_NAME)
+        if not is_healthy:
+            logger.warning("[watchmode_client] circuit OPEN – call skipped")
+            return []
 
     try:
         search_url = f"{WATCHMODE_URL}/search/"
@@ -77,8 +80,8 @@ async def get_streaming_sources(imdb_id: str, chat_id: str = "system") -> List[D
 
         # ── Success path ─────────────────────────────────────────────────
         if hs is not None:
-            hs.report_success(PROVIDER_NAME)
-            hs.increment_daily_calls(PROVIDER_NAME)
+            asyncio.create_task(asyncio.to_thread(hs.report_success, PROVIDER_NAME))
+            asyncio.create_task(asyncio.to_thread(hs.increment_daily_calls, PROVIDER_NAME))
         LoggingService.log_api_usage(
             provider=PROVIDER_NAME,
             action="get_streaming_sources",
@@ -89,7 +92,7 @@ async def get_streaming_sources(imdb_id: str, chat_id: str = "system") -> List[D
     except Exception as exc:
         logger.error("Watchmode request failed for %r: %s", imdb_id, exc)
         if hs is not None:
-            hs.report_failure(PROVIDER_NAME)
+            asyncio.create_task(asyncio.to_thread(hs.report_failure, PROVIDER_NAME))
         return []
 
 

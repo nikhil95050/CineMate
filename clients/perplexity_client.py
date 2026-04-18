@@ -7,12 +7,13 @@ Integrates with HealthService for circuit-breaker protection:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Dict, List, Optional
 
 import httpx
 
-from services.logging_service import get_logger, error_batcher
+from services.logging_service import LoggingService, get_logger, error_batcher
 from utils.time_utils import utc_now_iso
 
 logger = get_logger("perplexity")
@@ -41,13 +42,14 @@ async def chat(
     temperature: float = 0.7,
     max_tokens: int = 1500,
     timeout: float = 30.0,
+    chat_id: str = "system",
 ) -> Optional[str]:
     """Call Perplexity and return the assistant message content, or None on failure."""
     api_key = _api_key()
     if not api_key:
         logger.warning("PERPLEXITY_API_KEY not set — skipping Perplexity call")
         error_batcher.emit({
-            "chat_id": "system",
+            "chat_id": str(chat_id),
             "error_type": "missing_api_key",
             "error_message": "PERPLEXITY_API_KEY is not set",
             "workflow_step": "perplexity_client.chat",
@@ -60,9 +62,11 @@ async def chat(
 
     # ── Circuit-breaker / feature-flag guard ─────────────────────────────────
     hs = _health()
-    if hs is not None and not hs.is_healthy(PROVIDER_NAME):
-        logger.warning("[perplexity_client] circuit OPEN – call skipped")
-        return None
+    if hs is not None:
+        is_healthy = await asyncio.to_thread(hs.is_healthy, PROVIDER_NAME)
+        if not is_healthy:
+            logger.warning("[perplexity_client] circuit OPEN – call skipped")
+            return None
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -80,10 +84,19 @@ async def chat(
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
+            usage = data.get("usage") or {}
             # ── Success path ─────────────────────────────────────────────────
             if hs is not None:
-                hs.report_success(PROVIDER_NAME)
-                hs.increment_daily_calls(PROVIDER_NAME)
+                asyncio.create_task(asyncio.to_thread(hs.report_success, PROVIDER_NAME))
+                asyncio.create_task(asyncio.to_thread(hs.increment_daily_calls, PROVIDER_NAME))
+            LoggingService.log_api_usage(
+                provider=PROVIDER_NAME,
+                action=f"chat:{model}",
+                chat_id=chat_id,
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                total_tokens=usage.get("total_tokens"),
+            )
             return content
 
     except httpx.HTTPStatusError as exc:
@@ -104,7 +117,7 @@ async def chat(
             "timestamp": utc_now_iso(),
         })
         if hs is not None:
-            hs.report_failure(PROVIDER_NAME)
+            asyncio.create_task(asyncio.to_thread(hs.report_failure, PROVIDER_NAME))
         return None
 
     except Exception as exc:
@@ -120,5 +133,5 @@ async def chat(
             "timestamp": utc_now_iso(),
         })
         if hs is not None:
-            hs.report_failure(PROVIDER_NAME)
+            asyncio.create_task(asyncio.to_thread(hs.report_failure, PROVIDER_NAME))
         return None

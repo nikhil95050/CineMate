@@ -147,20 +147,8 @@ async def _finalize(chat_id: Any, session_model: SessionModel) -> None:
         logger.warning("question finalize failed for %s: %s", chat_id, exc)
         movies = []
 
-    serialised: List[Dict[str, Any]] = []
-    for movie in movies or []:
-        if isinstance(movie, dict):
-            serialised.append(movie)
-        elif hasattr(movie, "model_dump"):
-            serialised.append(movie.model_dump(mode="json"))
-        elif hasattr(movie, "dict"):
-            serialised.append(movie.dict())
-
-    session_model.last_recs_json = json.dumps(serialised)
-    container.session_service.upsert_session(session_model)
-
-    if serialised:
-        await send_movies_async(chat_id, serialised)
+    if movies:
+        await send_movies_async(chat_id, movies)
 
 
 async def _move_next(

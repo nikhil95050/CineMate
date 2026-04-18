@@ -92,20 +92,17 @@ async def send_single_movie_async(chat_id: Any, movie: Dict[str, Any]) -> None:
 
     poster = movie.get("poster")
     if poster and poster != "N/A":
-        from clients.telegram_helpers import BASE_URL
-        import httpx
-        payload = {
-            "chat_id": chat_id,
-            "photo": poster,
-            "caption": text,
-            "parse_mode": "HTML",
-            "reply_markup": keyboard,
-        }
+        from clients.telegram_client import TelegramClient
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(f"{BASE_URL}/sendPhoto", json=payload)
-                if resp.status_code == 200:
-                    return
+            client = TelegramClient.get_instance()
+            await client.send_photo(
+                chat_id=chat_id,
+                photo=poster,
+                caption=text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+            return
         except Exception as exc:
             logger.warning("sendPhoto failed (%s), falling back to text", exc)
 

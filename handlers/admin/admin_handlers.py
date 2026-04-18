@@ -1,6 +1,7 @@
 """Admin command handlers: health, stats, cache, errors, usage, provider flags."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -36,7 +37,7 @@ async def handle_admin_health(
 ) -> None:
     from services.container import admin_service
     try:
-        result = admin_service.check_health()
+        result = await asyncio.to_thread(admin_service.check_health)
     except Exception as exc:
         logger.error("[admin_health] exception: %s", exc)
         await send_message(chat_id, "\u26a0\ufe0f Health check failed internally.")
@@ -62,7 +63,7 @@ async def handle_admin_stats(
 ) -> None:
     from services.container import admin_service
     try:
-        stats = admin_service.get_stats()
+        stats = await asyncio.to_thread(admin_service.get_stats)
     except Exception as exc:
         logger.error("[admin_stats] exception: %s", exc)
         await send_message(chat_id, "\u26a0\ufe0f Could not retrieve stats.")
@@ -89,7 +90,7 @@ async def handle_admin_clear_cache(
 ) -> None:
     from services.container import admin_service
     try:
-        report = admin_service.clear_cache()
+        report = await asyncio.to_thread(admin_service.clear_cache)
     except Exception as exc:
         logger.error("[admin_clear_cache] exception: %s", exc)
         await send_message(chat_id, "\u26a0\ufe0f Cache clear encountered an error.")
@@ -122,7 +123,7 @@ async def handle_admin_errors(
             pass
 
     try:
-        errors = admin_service.get_recent_errors(limit=limit)
+        errors = await asyncio.to_thread(admin_service.get_recent_errors, limit=limit)
     except Exception as exc:
         logger.error("[admin_errors] exception: %s", exc)
         await send_message(chat_id, "\u26a0\ufe0f Could not retrieve error logs.")
@@ -173,7 +174,7 @@ async def handle_admin_usage(
             pass
 
     try:
-        report = admin_service.get_usage_report(hours=hours)
+        report = await asyncio.to_thread(admin_service.get_usage_report, hours=hours)
     except Exception as exc:
         logger.error("[admin_usage] exception: %s", exc)
         await send_message(chat_id, "\u26a0\ufe0f Could not retrieve usage report.")
@@ -227,7 +228,7 @@ async def handle_admin_disable_provider(
         return
     provider = parts[-1].strip()
     try:
-        admin_service.disable_provider(provider)
+        await asyncio.to_thread(admin_service.disable_provider, provider)
         await send_message(chat_id, f"\U0001f534 Provider <b>{provider}</b> disabled.")
     except Exception as exc:
         logger.error("[admin_disable_provider] exception: %s", exc)
@@ -247,7 +248,7 @@ async def handle_admin_enable_provider(
         return
     provider = parts[-1].strip()
     try:
-        admin_service.enable_provider(provider)
+        await asyncio.to_thread(admin_service.enable_provider, provider)
         await send_message(chat_id, f"\U0001f7e2 Provider <b>{provider}</b> enabled.")
     except Exception as exc:
         logger.error("[admin_enable_provider] exception: %s", exc)

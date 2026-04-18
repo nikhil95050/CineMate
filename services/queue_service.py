@@ -64,6 +64,7 @@ def _get_queue():
         return None
     try:
         from rq import Queue  # type: ignore
+        from rq.retry import Retry
     except Exception:
         logger.warning("[Queue] RQ import failed; falling back to inline execution only.")
         return None
@@ -107,7 +108,11 @@ def enqueue_job(func_name: str, **kwargs: Any) -> None:
         # Use queue.enqueue(func, **kwargs) — the modern RQ 1.x+ API.
         # enqueue_call(func=..., kwargs=...) was deprecated in RQ 1.x and
         # removed in RQ 2.x; it must not be used on RQ >= 1.0.
-        job = queue.enqueue(func, **kwargs)
+        try:
+            from rq.retry import Retry
+            job = queue.enqueue(func, retry=Retry(max=3, interval=30), **kwargs)
+        except ImportError:
+            job = queue.enqueue(func, **kwargs)
         logger.info(
             "[Queue] Enqueued '%s' for chat_id=%s as job_id=%s",
             func_name,

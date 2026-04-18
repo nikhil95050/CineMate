@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import weakref
+
 from typing import Any, Dict, List, Optional
 
 from models.domain import MovieModel, SessionModel, UserModel
@@ -16,7 +16,7 @@ logger = get_logger("rec_service")
 BATCH_SIZE = 5
 
 # Hold strong references so Python 3.11+ cannot GC-cancel background tasks.
-_background_tasks: weakref.WeakSet = weakref.WeakSet()
+_background_tasks: set = set()
 
 
 def _parse_json_list(raw: str) -> List[Dict[str, Any]]:
@@ -190,9 +190,12 @@ class RecommendationService:
     ) -> Optional[float]:
         if session is None:
             return None
-        raw = session.answers_rating or ""
-        mapping = {"6+": 6.0, "7+": 7.0, "8+": 8.0, "9+": 9.0, "any": None}
-        val = mapping.get(raw.lower())
+        raw = (session.answers_rating or "").strip().lower()
+        if raw == "any":
+            return None
+            
+        mapping = {"6+": 6.0, "7+": 7.0, "8+": 8.0, "9+": 9.0}
+        val = mapping.get(raw)
         if val is not None:
             return val
         if user and user.avg_rating_preference:

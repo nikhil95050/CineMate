@@ -52,7 +52,7 @@ def normalize(update: dict) -> dict:
 
 async def process_update(update: dict, client: httpx.AsyncClient) -> None:
     from handlers.normalizer import detect_intent
-    from services.container import session_service
+    from services.container import session_service, user_service
     from services.worker_service import run_intent_job
 
     normalized = normalize(update)
@@ -79,6 +79,12 @@ async def process_update(update: dict, client: httpx.AsyncClient) -> None:
     except Exception:
         session_row = {}
 
+    try:
+        user_model = user_service.get_user(str(chat_id))
+        user_row = user_model.to_row()
+    except Exception:
+        user_row = {}
+
     intent = detect_intent(input_text, session_row)
     request_id = str(uuid.uuid4())
 
@@ -91,7 +97,7 @@ async def process_update(update: dict, client: httpx.AsyncClient) -> None:
             username=username,
             input_text=input_text,
             session=session_row,
-            user={},
+            user=user_row,
             request_id=request_id,
             callback_query_id=callback_query_id,
             message_id=message_id,

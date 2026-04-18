@@ -109,3 +109,23 @@ class TelegramClient:
         payload: dict[str, Any] = {"chat_id": chat_id, "action": action}
         payload.update(kwargs)
         return await self._post("sendChatAction", payload)
+
+    async def send_photo(
+        self,
+        chat_id: Any,
+        photo: str,
+        caption: str = "",
+        parse_mode: str = "HTML",
+        reply_markup: Optional[Any] = None,
+        **kwargs,
+    ) -> Optional[dict[str, Any]]:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "photo": photo,
+            "caption": caption,
+            "parse_mode": parse_mode,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        payload.update(kwargs)
+        return await self._post("sendPhoto", payload)

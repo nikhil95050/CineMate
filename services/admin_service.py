@@ -16,8 +16,9 @@ _TOKEN_COSTS: Dict[str, float] = {
 
 
 class AdminService:
-    def __init__(self, admin_repo):
+    def __init__(self, admin_repo, health_service=None):
         self.admin_repo = admin_repo
+        self._health_service = health_service
 
     # ------------------------------------------------------------------
     # Health
@@ -49,7 +50,52 @@ class AdminService:
         except Exception as exc:
             results["redis"] = f"exception: {exc}"
 
+        # ── External API providers ───────────────────────────────────────
+        import os
+
+        # Perplexity
+        perplexity_key = os.environ.get("PERPLEXITY_API_KEY", "").strip()
+        if not perplexity_key:
+            results["perplexity"] = "not_configured"
+        else:
+            results["perplexity"] = self._provider_circuit_status("perplexity")
+
+        # OMDb
+        omdb_key = os.environ.get("OMDB_API_KEY", "").strip()
+        if not omdb_key:
+            results["omdb"] = "not_configured"
+        else:
+            results["omdb"] = self._provider_circuit_status("omdb")
+
+        # Watchmode
+        watchmode_key = os.environ.get("WATCHMODE_API_KEY", "").strip()
+        if not watchmode_key:
+            results["watchmode"] = "not_configured"
+        else:
+            results["watchmode"] = self._provider_circuit_status("watchmode")
+
         return results
+
+    def _provider_circuit_status(self, provider: str) -> str:
+        """Check HealthService circuit-breaker state for a provider."""
+        hs = self._health_service
+        if hs is None:
+            # Try to get it from the container as a fallback
+            try:
+                from services.container import health_service
+                hs = health_service
+            except Exception:
+                pass
+        if hs is not None:
+            try:
+                status = hs.get_provider_status(provider)
+                state = status.get("state", "unknown")
+                if state == "closed":
+                    return "ok"
+                return state  # open_circuit, half_open, open_manual
+            except Exception as exc:
+                return f"check_error: {exc}"
+        return "ok"  # No health service available, assume ok
 
     # ------------------------------------------------------------------
     # Stats

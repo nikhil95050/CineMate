@@ -54,10 +54,10 @@ movie_service     = MovieService(
 )
 discovery_service = DiscoveryService()
 rec_service       = RecommendationService(discovery=discovery_service)
-admin_service     = AdminService(admin_repo=admin_repo)
 
 # Feature 10 ----------------------------------------------------------------
-# health_service must be created BEFORE semantic_service because
-# SemanticService.__init__ accepts an optional health_service reference.
+# health_service must be created BEFORE admin_service and semantic_service
+# because both accept an optional health_service reference.
 health_service   = HealthService(admin_repo=admin_repo)
+admin_service    = AdminService(admin_repo=admin_repo, health_service=health_service)
 semantic_service = SemanticService(health_service=health_service)

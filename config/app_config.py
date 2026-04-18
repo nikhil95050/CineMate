@@ -22,6 +22,7 @@ The four keys match the column naming used throughout the codebase:
 import os
 import logging
 import threading
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,10 +43,37 @@ _runtime_flags = {
     "explanations": _as_bool(os.environ.get("ENABLE_EXPLANATIONS"), True),
 }
 
+_config_cache = {}
+_CACHE_TTL = 60
 
 def is_feature_enabled(name: str) -> bool:
+    # Check database for canonical flag first, using a short-lived cache to avoid blocking the event loop
+    key = name if name.startswith("provider.") else f"provider.{name.lower()}.enabled"
+    if name in ("bot_active", "bot.active"):
+        key = "bot.active"
+        
     with _flag_lock:
-        return bool(_runtime_flags.get(name, True))
+        now = time.time()
+        cached = _config_cache.get(key)
+        if cached is not None and now - cached['time'] < _CACHE_TTL:
+            return cached['value']
+
+    try:
+        from services.container import admin_repo
+        if admin_repo:
+            val = admin_repo.get_config(key)
+            if val is not None:
+                res = _as_bool(val)
+                with _flag_lock:
+                    _config_cache[key] = {'time': time.time(), 'value': res}
+                return res
+    except Exception as exc:
+        _logger.warning("[app_config] is_feature_enabled DB check failed for %s: %s", name, exc)
+
+    with _flag_lock:
+        res = bool(_runtime_flags.get(name, True))
+        _config_cache[key] = {'time': time.time(), 'value': res}
+        return res
 
 
 def set_feature_flag(name: str, enabled: bool) -> None:
@@ -66,10 +94,10 @@ def get_feature_flags() -> dict:
 # ON CONFLICT DO NOTHING means existing rows are never overwritten, so
 # runtime overrides set via the admin panel (or direct DB edits) are safe.
 _DEFAULT_APP_CONFIG_ROWS = [
-    {"key": "omdb_enabled",       "value": "true"},
-    {"key": "watchmode_enabled",   "value": "true"},
-    {"key": "perplexity_enabled",  "value": "true"},
-    {"key": "bot_active",          "value": "true"},
+    {"key": "provider.omdb.enabled",       "value": "true"},
+    {"key": "provider.watchmode.enabled",  "value": "true"},
+    {"key": "provider.perplexity.enabled", "value": "true"},
+    {"key": "bot.active",                  "value": "true"},
 ]
 
 

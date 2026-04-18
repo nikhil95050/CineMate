@@ -202,16 +202,23 @@ class LoggingService:
 
         try:
             from repositories.api_usage_repository import api_usage_repo
-            api_usage_repo.log(
-                provider=provider,
-                action=action,
-                chat_id=safe_chat_id,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-            )
+            
+            def _do_log():
+                try:
+                    api_usage_repo.log(
+                        provider=provider,
+                        action=action,
+                        chat_id=safe_chat_id,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=total_tokens,
+                    )
+                except Exception as exc:
+                    _logger.warning("[LoggingService] bg log_api_usage failed: %s", exc)
+                    
+            threading.Thread(target=_do_log, daemon=True).start()
         except Exception as exc:
-            _logger.warning("[LoggingService] log_api_usage failed: %s", exc)
+            _logger.warning("[LoggingService] log_api_usage init failed: %s", exc)
 
     @staticmethod
     @contextmanager

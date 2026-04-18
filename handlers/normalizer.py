@@ -80,26 +80,34 @@ def detect_intent(input_text: str, session: Optional[Dict[str, Any]] = None) -> 
     only the core commands needed for early development.
     """
     text = (input_text or "").lower().strip()
+    if not text:
+        return "fallback"
+
+    cmd = text.split()[0].split('@')[0]
 
     # Simple commands
-    if text.startswith("/start"):
+    if cmd == "/start":
         return "start"
-    if text.startswith("/reset"):
+    if cmd == "/reset":
         return "reset"
-    if text.startswith("/help"):
+    if cmd == "/help":
         return "help"
-    if text.startswith("/rating") or text.startswith("/min_rating"):
+    if cmd in ("/rating", "/min_rating"):
         return "min_rating"
-    if text.startswith("/movie"):
+    if cmd == "/movie":
         return "movie"
-    if text.startswith("/search"):
+    if cmd == "/search":
         return "search"
+    if cmd == "/star":
+        return "star"
+    if cmd == "/share":
+        return "share"
 
     # BUG FIX #2: use startswith so /trending@BotName and /trending <args>
     # are handled correctly, not just the bare exact string.
-    if text.startswith("/trending") or text == "trending":
+    if cmd == "/trending" or text == "trending":
         return "trending"
-    if text.startswith("/surprise") or text == "surprise":
+    if cmd == "/surprise" or text == "surprise":
         return "surprise"
 
     # Repository-like views
@@ -136,6 +144,10 @@ def detect_intent(input_text: str, session: Optional[Dict[str, Any]] = None) -> 
     # BUG FIX #1: admin commands — strip only the leading slash and take the
     # first word so "/admin_broadcast hello world" → "admin_broadcast", not
     # the full remaining string which never matches any intent in worker_service.
+    # Also match non-slash admin callbacks (e.g. inline button data like
+    # "admin_broadcast_confirm" or "admin_broadcast_cancel").
+    if text.startswith("admin_"):
+        return text.split()[0]
     if text.startswith("/admin_"):
         return text.split()[0].replace("/", "", 1)
 

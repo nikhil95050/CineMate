@@ -1,6 +1,7 @@
 """admin_only: decorator that silently ignores calls from non-admin users."""
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 from typing import Any, Callable
@@ -17,7 +18,10 @@ def admin_only(func: Callable) -> Callable:
         chat_id_str = str(chat_id) if chat_id is not None else ""
         try:
             from services.container import admin_repo
-            if not admin_repo or not admin_repo.is_admin(chat_id_str):
+            if not admin_repo:
+                return
+            is_admin = await asyncio.to_thread(admin_repo.is_admin, chat_id_str)
+            if not is_admin:
                 logger.debug(
                     "[admin_only] blocked non-admin %s from %s",
                     chat_id_str, func.__name__,

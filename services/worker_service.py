@@ -11,19 +11,64 @@ BUG-10 FIX: handle_start() called with keyword arguments to match its signature.
 """
 from __future__ import annotations
 
+import asyncio
 import time
+import importlib
 from contextvars import ContextVar
 from typing import Any, Dict
 
 from models import SessionModel, UserModel
 from services.logging_service import LoggingService
+from services.container import admin_repo
 from utils.time_utils import utc_now_iso
 
 # BUG #8 FIX — handlers set this context var with their final text response
 _bot_response_ctx: ContextVar[str] = ContextVar("bot_response_text", default="")
 
 # Minimum text length before semantic routing is attempted
-_SEMANTIC_MIN_LEN = 8
+_SEMANTIC_MIN_LEN = 10
+
+INTENT_HANDLERS = {
+    "start": "handlers.user_handlers.handle_start",
+    "help": "handlers.user_handlers.handle_help",
+    "reset": "handlers.user_handlers.handle_reset",
+    "watchlist": "handlers.history_handlers.handle_watchlist",
+    "history": "handlers.history_handlers.handle_history",
+    "watched": "handlers.history_handlers.handle_watched",
+    "save": "handlers.history_handlers.handle_save",
+    "questioning": "handlers.rec_handlers.handle_questioning",
+    "movie": "handlers.movie_handlers.handle_movie",
+    "trending": "handlers.movie_handlers.handle_trending",
+    "surprise": "handlers.movie_handlers.handle_surprise",
+    "more_like": "handlers.movie_handlers.handle_more_like",
+    "more_suggestions": "handlers.movie_handlers.handle_more_suggestions",
+    "like": "handlers.feedback_handlers.handle_like",
+    "dislike": "handlers.feedback_handlers.handle_dislike",
+    "min_rating": "handlers.feedback_handlers.handle_min_rating",
+    "star": "handlers.discovery_handlers.handle_star",
+    "share": "handlers.discovery_handlers.handle_share",
+    "admin_health": "handlers.admin.handle_admin_health",
+    "admin_stats": "handlers.admin.handle_admin_stats",
+    "admin_clear_cache": "handlers.admin.handle_admin_clear_cache",
+    "admin_errors": "handlers.admin.handle_admin_errors",
+    "admin_usage": "handlers.admin.handle_admin_usage",
+    "admin_broadcast": "handlers.admin.handle_admin_broadcast",
+    "admin_broadcast_confirm": "handlers.admin.handle_admin_broadcast_confirm",
+    "admin_broadcast_cancel": "handlers.admin.handle_admin_broadcast_cancel",
+    "admin_disable_provider": "handlers.admin.handle_admin_disable_provider",
+    "admin_enable_provider": "handlers.admin.handle_admin_enable_provider",
+    "search": "handlers.movie_handlers.handle_movie",
+    "movie_search": "handlers.movie_handlers.handle_movie",
+}
+
+
+def get_handler_func(intent: str):
+    path = INTENT_HANDLERS.get(intent)
+    if not path:
+        return None
+    module_path, func_name = path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, func_name)
 
 
 def set_bot_response(text: str) -> None:
@@ -63,129 +108,17 @@ async def run_intent_job(
     _bot_response_ctx.set("")
 
     try:
-        if intent == "start":
-            from handlers.user_handlers import handle_start
-            # BUG-10 FIX: use keyword arguments to match handle_start's signature
-            # instead of positional args which break when the signature changes.
-            await handle_start(
-                chat_id=chat_id_str,
-                username=username,
-                session=session,
-                user=user,
-            )
-
-        elif intent == "help":
-            from handlers.user_handlers import handle_help
-            await handle_help(**kwargs)
-
-        elif intent == "reset":
-            from handlers.user_handlers import handle_reset
-            await handle_reset(**kwargs)
-
-        elif intent == "watchlist":
-            from handlers.history_handlers import handle_watchlist
-            await handle_watchlist(**kwargs)
-
-        elif intent == "history":
-            from handlers.history_handlers import handle_history
-            await handle_history(**kwargs)
-
-        elif intent == "watched":
-            from handlers.history_handlers import handle_watched
-            await handle_watched(**kwargs)
-
-        elif intent == "save":
-            from handlers.history_handlers import handle_save
-            await handle_save(**kwargs)
-
-        elif intent == "questioning":
-            from handlers.rec_handlers import handle_questioning
-            await handle_questioning(**kwargs)
-
-        elif intent == "movie":
-            from handlers.movie_handlers import handle_movie
-            await handle_movie(**kwargs)
-
-        elif intent == "trending":
-            from handlers.movie_handlers import handle_trending
-            await handle_trending(**kwargs)
-
-        elif intent == "surprise":
-            from handlers.movie_handlers import handle_surprise
-            await handle_surprise(**kwargs)
-
-        elif intent == "more_like":
-            from handlers.movie_handlers import handle_more_like
-            await handle_more_like(**kwargs)
-
-        elif intent == "more_suggestions":
-            from handlers.movie_handlers import handle_more_suggestions
-            await handle_more_suggestions(**kwargs)
-
-        elif intent == "like":
-            from handlers.feedback_handlers import handle_like
-            await handle_like(**kwargs)
-
-        elif intent == "dislike":
-            from handlers.feedback_handlers import handle_dislike
-            await handle_dislike(**kwargs)
-
-        elif intent == "min_rating":
-            from handlers.feedback_handlers import handle_min_rating
-            await handle_min_rating(**kwargs)
-
-        elif intent == "star":
-            from handlers.discovery_handlers import handle_star
-            await handle_star(**kwargs)
-
-        elif intent == "share":
-            from handlers.discovery_handlers import handle_share
-            await handle_share(**kwargs)
-
-        elif intent == "admin_health":
-            from handlers.admin import handle_admin_health
-            await handle_admin_health(**kwargs)
-
-        elif intent == "admin_stats":
-            from handlers.admin import handle_admin_stats
-            await handle_admin_stats(**kwargs)
-
-        elif intent == "admin_clear_cache":
-            from handlers.admin import handle_admin_clear_cache
-            await handle_admin_clear_cache(**kwargs)
-
-        elif intent == "admin_errors":
-            from handlers.admin import handle_admin_errors
-            await handle_admin_errors(**kwargs)
-
-        elif intent == "admin_usage":
-            from handlers.admin import handle_admin_usage
-            await handle_admin_usage(**kwargs)
-
-        elif intent == "admin_broadcast":
-            from handlers.admin import handle_admin_broadcast
-            await handle_admin_broadcast(**kwargs)
-
-        elif intent == "admin_broadcast_confirm":
-            from handlers.admin import handle_admin_broadcast_confirm
-            await handle_admin_broadcast_confirm(**kwargs)
-
-        elif intent == "admin_broadcast_cancel":
-            from handlers.admin import handle_admin_broadcast_cancel
-            await handle_admin_broadcast_cancel(**kwargs)
-
-        elif intent == "admin_disable_provider":
-            from handlers.admin import handle_admin_disable_provider
-            await handle_admin_disable_provider(**kwargs)
-
-        elif intent == "admin_enable_provider":
-            from handlers.admin import handle_admin_enable_provider
-            await handle_admin_enable_provider(**kwargs)
-
-        elif intent in ("search", "movie_search"):
-            from handlers.movie_handlers import handle_movie
-            await handle_movie(**kwargs)
-
+        handler_func = get_handler_func(intent)
+        if handler_func:
+            if intent == "start":
+                await handler_func(
+                    chat_id=chat_id_str,
+                    username=username,
+                    session=session,
+                    user=user,
+                )
+            else:
+                await handler_func(**kwargs)
         else:
             if (
                 intent == "fallback"
@@ -225,8 +158,8 @@ async def run_intent_job(
 
         # BUG #3 FIX — increment total_interactions stat
         try:
-            from repositories.admin_repository import AdminRepository
-            AdminRepository().increment_stat("total_interactions")
+            from services.container import admin_repo
+            asyncio.create_task(asyncio.to_thread(admin_repo.increment_stat, "total_interactions"))
         except Exception:
             pass
 
@@ -255,8 +188,8 @@ async def run_intent_job(
 
         # BUG #3 FIX — increment total_errors stat
         try:
-            from repositories.admin_repository import AdminRepository
-            AdminRepository().increment_stat("total_errors")
+            from services.container import admin_repo
+            asyncio.create_task(asyncio.to_thread(admin_repo.increment_stat, "total_errors"))
         except Exception:
             pass
 
