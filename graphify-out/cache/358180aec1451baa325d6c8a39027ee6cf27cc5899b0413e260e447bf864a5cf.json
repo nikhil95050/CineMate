@@ -1,1 +1,0 @@
-{"nodes": [{"id": "handlers_init_py", "label": "__init__.py", "file_type": "code", "source_file": "handlers\\__init__.py", "source_location": "L1"}], "edges": [{"source": "handlers_init_py", "target": "handlers_normalizer_py", "relation": "imports_from", "confidence": "EXTRACTED", "source_file": "handlers\\__init__.py", "source_location": "L1", "weight": 1.0}], "raw_calls": []}
