@@ -30,6 +30,20 @@ CACHE_TTL = 120  # seconds
 
 _NOT_NULL_TEXT_COLS = frozenset({"year", "genres", "language", "rating", "title"})
 
+# C-3 FIX: whitelist of columns that exist in the history Supabase table.
+# Any extra keys (description, poster, trailer, streaming_info, reason, etc.)
+# would cause PostgREST to reject the upsert with an "unknown column" error.
+# Mirrors the Fix #11 pattern used in watchlist_repository.
+_HISTORY_COLUMNS = frozenset(
+    {"chat_id", "movie_id", "title", "year", "genres", "language",
+     "rating", "recommended_at", "watched", "watched_at"}
+)
+
+
+def _sanitise_for_db(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of *row* containing only the history schema columns."""
+    return {k: v for k, v in row.items() if k in _HISTORY_COLUMNS}
+
 
 def _cache_key(chat_id: str, page: int) -> str:
     return f"history:{chat_id}:p{page}"
@@ -81,9 +95,11 @@ class HistoryRepository:
 
         if sb.is_configured():
             try:
+                # C-3 FIX: strip to schema columns before DB write
+                db_rows = [_sanitise_for_db(r) for r in enriched]
                 sb.insert_rows(
                     TABLE,
-                    enriched,
+                    db_rows,
                     upsert=True,
                     on_conflict="chat_id,movie_id",
                 )
@@ -173,11 +189,8 @@ class HistoryRepository:
         chat_id = str(chat_id)
         if sb.is_configured():
             try:
-                rows, error = sb.select_rows(
-                    TABLE, filters={"chat_id": chat_id}
-                )
-                if not error and rows is not None:
-                    return len(rows)
+                # H-2 FIX: use efficient PostgREST count instead of fetching all rows
+                return sb.count_rows(TABLE, filters={"chat_id": chat_id})
             except Exception as exc:
                 logger.warning("[HistoryRepo] get_total_count failed: %s", exc)
         return len(self._store.get(chat_id, []))

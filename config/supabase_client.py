@@ -261,9 +261,54 @@ def delete_rows(
     )
 
 
+# ---------------------------------------------------------------------------
+# H-2 FIX: efficient row count using PostgREST Prefer: count=exact
+# ---------------------------------------------------------------------------
+
+def count_rows(
+    table: str,
+    filters: Optional[Dict[str, Any]] = None,
+) -> int:
+    """Return the number of rows matching *filters* without fetching data.
+
+    Uses PostgREST's ``Prefer: count=exact`` header with ``limit=0`` so
+    only the ``Content-Range`` header is inspected — no row payload is
+    transferred or parsed.  Falls back to ``len(select_rows(...))`` on
+    any failure.
+    """
+    if not is_configured():
+        return 0
+    params: Dict[str, Any] = {"limit": 0}
+    if filters:
+        for key, value in filters.items():
+            params[key] = _format_filter(value)
+    url, headers = _build_url_and_headers(table, prefer="count=exact")
+    try:
+        resp = _get_sync_client().request(
+            "HEAD", url, headers=headers, params=params,
+        )
+        # PostgREST returns Content-Range: 0-0/N or */N
+        cr = resp.headers.get("content-range", "")
+        if "/" in cr:
+            total_str = cr.rsplit("/", 1)[-1]
+            if total_str != "*":
+                return int(total_str)
+    except Exception:
+        pass
+    # Fallback: fetch all rows and count (original behaviour)
+    try:
+        rows, err = select_rows(table, filters=filters)
+        if not err and rows is not None:
+            return len(rows)
+    except Exception:
+        pass
+    return 0
+
+
 def is_available() -> bool:
     try:
         data, error = select_rows("sessions", limit=0)
         return error is None
     except Exception:  # pragma: no cover - defensive
         return False
+

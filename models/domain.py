@@ -413,6 +413,9 @@ class SessionModel(BaseModel):
     answers_favorites: Optional[str] = None
     answers_rating: Optional[str] = None
 
+    # C-1 FIX: DB column existed but was missing from the model.
+    last_question_msg_id: Optional[str] = None
+
     last_recs_json: str = "[]"
     overflow_buffer_json: str = "[]"
     sim_depth: int = 0
@@ -435,6 +438,7 @@ class SessionModel(BaseModel):
             answers_avoid=row.get("answers_avoid") or None,
             answers_favorites=row.get("answers_favorites") or None,
             answers_rating=row.get("answers_rating") or None,
+            last_question_msg_id=row.get("last_question_msg_id") or None,
             last_recs_json=row.get("last_recs_json") or "[]",
             overflow_buffer_json=row.get("overflow_buffer_json") or "[]",
             sim_depth=int(row.get("sim_depth") or 0),
@@ -442,20 +446,23 @@ class SessionModel(BaseModel):
         )
 
     def to_row(self) -> Dict[str, Any]:
+        # C-2 + M-1 FIX: write None (SQL NULL) for nullable text columns
+        # instead of "" so DB-level IS NULL queries work correctly.
         return {
             "chat_id": self.chat_id,
             "session_state": self.session_state,
             "question_index": self.question_index,
-            "pending_question": self.pending_question or "",
-            "answers_mood": self.answers_mood or "",
-            "answers_genre": self.answers_genre or "",
-            "answers_language": self.answers_language or "",
-            "answers_era": self.answers_era or "",
-            "answers_context": self.answers_context or "",
-            "answers_time": self.answers_time or "",
-            "answers_avoid": self.answers_avoid or "",
-            "answers_favorites": self.answers_favorites or "",
-            "answers_rating": self.answers_rating or "",
+            "pending_question": self.pending_question,
+            "answers_mood": self.answers_mood,
+            "answers_genre": self.answers_genre,
+            "answers_language": self.answers_language,
+            "answers_era": self.answers_era,
+            "answers_context": self.answers_context,
+            "answers_time": self.answers_time,
+            "answers_avoid": self.answers_avoid,
+            "answers_favorites": self.answers_favorites,
+            "answers_rating": self.answers_rating,
+            "last_question_msg_id": self.last_question_msg_id,
             "last_recs_json": self.last_recs_json,
             "overflow_buffer_json": self.overflow_buffer_json,
             "sim_depth": int(self.sim_depth),

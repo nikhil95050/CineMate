@@ -186,7 +186,11 @@ class AdminRepository:
     # ------------------------------------------------------------------
 
     def get_usage_summary(self, hours: int = 24) -> List[Dict[str, Any]]:
-        """Aggregate api_usage by provider for the last `hours` hours."""
+        """Aggregate api_usage by provider for the last `hours` hours.
+
+        H-4 FIX: capped fetch to 1000 rows (was 5000) and added defensive
+        guard against large result sets timing out on Render's free tier.
+        """
         if sb.is_configured():
             try:
                 from datetime import datetime, timezone, timedelta
@@ -196,7 +200,8 @@ class AdminRepository:
                 res, err = sb.select_rows(
                     "api_usage",
                     filters={"timestamp": f"gte.{since}"},
-                    limit=5000,
+                    order="timestamp.desc",
+                    limit=1000,
                 )
                 if err or not res:
                     return []
@@ -219,10 +224,15 @@ class AdminRepository:
         return []
 
     def get_top_users(self, limit: int = 5) -> List[Dict[str, Any]]:
-        """Return top users by interaction count."""
+        """Return top users by interaction count.
+
+        H-3 FIX: capped fetch to 2000 rows (was 10000) to prevent timeouts
+        on Render's free tier.  For bots with heavy traffic, consider
+        maintaining per-user counters in bot_stats instead.
+        """
         if sb.is_configured():
             try:
-                res, err = sb.select_rows("user_interactions", limit=10000)
+                res, err = sb.select_rows("user_interactions", limit=2000, order="timestamp.desc")
                 if err or not res:
                     return []
                 counts: Dict[str, int] = {}

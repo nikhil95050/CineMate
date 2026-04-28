@@ -170,11 +170,8 @@ class WatchlistRepository:
         chat_id = str(chat_id)
         if sb.is_configured():
             try:
-                rows, error = sb.select_rows(
-                    TABLE, filters={"chat_id": chat_id}
-                )
-                if not error and rows is not None:
-                    return len(rows)
+                # H-2 FIX: use efficient PostgREST count instead of fetching all rows
+                return sb.count_rows(TABLE, filters={"chat_id": chat_id})
             except Exception as exc:
                 logger.warning(
                     "[WatchlistRepo] get_total_count failed: %s", exc

@@ -34,6 +34,15 @@ logger = logging.getLogger("user_repo")
 
 TABLE = "users"
 
+# M-3 FIX: whitelist of columns that exist in the users Supabase table.
+# Prevents stale or unexpected keys from causing PostgREST 400 errors.
+_USER_COLUMNS = frozenset(
+    {"chat_id", "username", "preferred_genres", "disliked_genres",
+     "preferred_language", "preferred_era", "watch_context",
+     "avg_rating_preference", "subscriptions", "user_taste_vector",
+     "updated_at"}
+)
+
 # jsonb list columns — must be Python list when sent to Supabase REST.
 _JSONB_LIST_COLS: tuple[str, ...] = (
     "preferred_genres",
@@ -103,6 +112,11 @@ def _coerce_jsonb_fields(row: Dict[str, Any]) -> Dict[str, Any]:
         result[col] = _parse_list(result.get(col))
     result["user_taste_vector"] = _parse_dict(result.get("user_taste_vector"))
     return result
+
+
+def _sanitise_for_db(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of *row* containing only the users schema columns."""
+    return {k: v for k, v in row.items() if k in _USER_COLUMNS}
 
 
 def _normalise_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -179,6 +193,8 @@ class UserRepository:
                 # BUG #6 FIX: coerce jsonb columns to native Python types
                 # before the Supabase REST upsert to prevent double-serialisation.
                 db_row = _coerce_jsonb_fields(row)
+                # M-3 FIX: strip to schema columns only
+                db_row = _sanitise_for_db(db_row)
                 sb.insert_rows(
                     TABLE,
                     [db_row],

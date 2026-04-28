@@ -107,6 +107,32 @@ async def lifespan(app: FastAPI):
     # asyncio.create_task() is the correct API for scheduling a coroutine
     # as a background task when an event loop is already running.
     asyncio.create_task(_keepalive_loop())
+
+    # M-2 FIX: clean up stale daily call counters from app_config on startup.
+    # These keys have the form "provider.<name>.calls.<YYYY-MM-DD>" and
+    # accumulate one per provider per day, forever.
+    try:
+        from datetime import datetime, timedelta, timezone
+        import config.supabase_client as sb
+        if sb.is_configured():
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+            rows, err = sb.select_rows("app_config", limit=500)
+            if not err and rows:
+                stale_keys = [
+                    r["key"] for r in rows
+                    if r.get("key", "").startswith("provider.") and ".calls." in r.get("key", "")
+                    and r["key"].rsplit(".", 1)[-1] < cutoff
+                ]
+                for key in stale_keys:
+                    sb.delete_rows("app_config", filters={"key": key})
+                if stale_keys:
+                    logging.getLogger("main").info(
+                        "[Lifespan] Cleaned %d stale daily call counter(s) from app_config",
+                        len(stale_keys),
+                    )
+    except Exception:
+        pass  # non-critical cleanup — never block startup
+
     yield
     # I-10 FIX: flush all buffered log batches before process exit so no
     # interaction or error log rows are silently dropped.
