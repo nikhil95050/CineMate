@@ -133,7 +133,7 @@ def _legacy_option_answer(session_model: SessionModel, input_text: str) -> Optio
 async def _finalize(chat_id: Any, session_model: SessionModel) -> None:
     chat_id_str = str(chat_id)
     await show_typing(chat_id)
-    await send_message(chat_id, "Reviewing my notes and scanning the archives…")
+    await send_message(chat_id, "Reviewing my notes and scanning the archives\u2026")
 
     user_model = container.user_service.get_user(chat_id_str)
     try:
@@ -149,6 +149,15 @@ async def _finalize(chat_id: Any, session_model: SessionModel) -> None:
 
     if movies:
         await send_movies_async(chat_id, movies)
+    else:
+        # ISSUE 1 FIX: always give the user feedback when no results are found
+        # so the bot never appears frozen after completing all questions.
+        await send_message(
+            chat_id,
+            "\U0001f614 I couldn't find great matches right now.\n\n"
+            "Try /surprise or /trending for instant picks, or "
+            "/start to adjust your preferences.",
+        )
 
 
 async def _move_next(
@@ -313,8 +322,13 @@ async def handle_recommend(
     chat_id: Any,
     **kwargs,
 ) -> None:
+    # ISSUE 2 FIX: reset ALL answer fields and pending_question so stale
+    # answers from a prior session never contaminate a new recommendation flow.
     session_model = container.session_service.get_session(str(chat_id))
     session_model.session_state = "questioning"
     session_model.question_index = 0
+    session_model.pending_question = None
+    for col in QUESTION_COLUMNS:
+        setattr(session_model, col, None)
     container.session_service.upsert_session(session_model)
     await _send_current_question(chat_id, session_model.to_row())

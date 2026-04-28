@@ -28,10 +28,6 @@ TABLE = "history"
 PAGE_SIZE = 10
 CACHE_TTL = 120  # seconds
 
-# Columns that are NOT NULL DEFAULT '' in the DB schema.
-# If the caller passes None for any of these, Supabase will attempt to
-# insert null and raise a constraint violation.  _coerce_row() converts
-# every None value in this set to an empty string before any DB write.
 _NOT_NULL_TEXT_COLS = frozenset({"year", "genres", "language", "rating", "title"})
 
 
@@ -40,12 +36,7 @@ def _cache_key(chat_id: str, page: int) -> str:
 
 
 def _coerce_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a copy of *row* with all NOT NULL text columns coerced to ''.
-
-    OMDB often returns "N/A" or omits fields entirely.  Down-stream code
-    sometimes normalises those to None before building the insert payload.
-    This helper ensures we never send null for a NOT NULL column.
-    """
+    """Return a copy of *row* with all NOT NULL text columns coerced to ''."""
     coerced = dict(row)
     for col in _NOT_NULL_TEXT_COLS:
         if col in coerced and coerced[col] is None:
@@ -57,7 +48,6 @@ class HistoryRepository:
     """CRUD + pagination for the history table."""
 
     def __init__(self) -> None:
-        # In-memory fallback (chat_id → list of rows, newest-first)
         self._store: Dict[str, List[Dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
@@ -77,12 +67,9 @@ class HistoryRepository:
             row.setdefault("recommended_at", now)
             row.setdefault("watched", False)
             row.setdefault("watched_at", None)
-            # BUG #3 FIX: coerce None → "" for NOT NULL text columns so
-            # Supabase never receives an explicit null for a NOT NULL field.
             row = _coerce_row(row)
             enriched.append(row)
 
-        # Update in-memory store (keyed by movie_id, newest first)
         existing = {r["movie_id"]: r for r in self._store.get(chat_id, [])}
         for row in enriched:
             existing[row["movie_id"]] = row
@@ -109,7 +96,6 @@ class HistoryRepository:
         chat_id = str(chat_id)
         now = utc_now_iso()
 
-        # Update in-memory fallback
         for row in self._store.get(chat_id, []):
             if row.get("movie_id") == movie_id:
                 row["watched"] = True
@@ -127,7 +113,23 @@ class HistoryRepository:
             except Exception as exc:
                 logger.warning("[HistoryRepo] mark_watched failed: %s", exc)
                 return False
-        return True  # in-memory update succeeded
+        return True
+
+    def clear_history(self, chat_id: str) -> None:
+        """ISSUE 5 FIX: delete all history rows for a user.
+
+        Removes the in-memory store entry, deletes from Supabase, and
+        invalidates all Redis cache pages for this user.
+        """
+        chat_id = str(chat_id)
+        self._store.pop(chat_id, None)
+        if sb.is_configured():
+            try:
+                sb.delete_rows(TABLE, filters={"chat_id": chat_id})
+                delete_prefix(f"history:{chat_id}:")
+            except Exception as exc:
+                logger.warning("[HistoryRepo] clear_history failed: %s", exc)
+                raise
 
     # ------------------------------------------------------------------
     # Read
@@ -140,7 +142,6 @@ class HistoryRepository:
         chat_id = str(chat_id)
         page = max(1, page)
 
-        # Try Redis / local cache
         cached = get_json(_cache_key(chat_id, page))
         if cached is not None:
             return cached
@@ -163,7 +164,6 @@ class HistoryRepository:
             except Exception as exc:
                 logger.warning("[HistoryRepo] get_history failed: %s", exc)
 
-        # In-memory fallback
         all_rows = self._store.get(chat_id, [])
         offset = (page - 1) * PAGE_SIZE
         return all_rows[offset : offset + PAGE_SIZE]

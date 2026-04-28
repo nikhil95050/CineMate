@@ -1,14 +1,4 @@
-"""Worker: routes intents to handlers.
-
-Fallback path (Feature 10):
-  When detect_intent returns 'fallback' AND the user message is long enough,
-  SemanticService.classify_intent is called once to attempt smarter routing.
-  A _semantic_attempted guard prevents recursion / double-classification.
-
-BUG #3 FIX: increment bot_stats (total_interactions / total_errors) on every intent.
-BUG #8 FIX: capture bot_response_text via contextvars so log_interaction is populated.
-BUG-10 FIX: handle_start() called with keyword arguments to match its signature.
-"""
+"""Worker: routes intents to handlers."""
 from __future__ import annotations
 
 import asyncio
@@ -22,10 +12,8 @@ from services.logging_service import LoggingService
 from services.container import admin_repo
 from utils.time_utils import utc_now_iso
 
-# BUG #8 FIX — handlers set this context var with their final text response
 _bot_response_ctx: ContextVar[str] = ContextVar("bot_response_text", default="")
 
-# Minimum text length before semantic routing is attempted
 _SEMANTIC_MIN_LEN = 10
 
 INTENT_HANDLERS = {
@@ -36,6 +24,10 @@ INTENT_HANDLERS = {
     "history": "handlers.history_handlers.handle_history",
     "watched": "handlers.history_handlers.handle_watched",
     "save": "handlers.history_handlers.handle_save",
+    # ISSUE 5 FIX: register clear_history so the implemented handler is reachable.
+    "clear_history": "handlers.history_handlers.handle_clear_history",
+    # ISSUE 12 FIX: register recommend so /recommend starts a clean question flow.
+    "recommend": "handlers.rec_handlers.handle_recommend",
     "questioning": "handlers.rec_handlers.handle_questioning",
     "movie": "handlers.movie_handlers.handle_movie",
     "trending": "handlers.movie_handlers.handle_trending",
@@ -104,7 +96,6 @@ async def run_intent_job(
     )
 
     t_start = time.time()
-    # BUG #8 FIX — reset context var for this job
     _bot_response_ctx.set("")
 
     try:
@@ -156,14 +147,12 @@ async def run_intent_job(
         latency_ms = int((time.time() - t_start) * 1000)
         bot_replied_at = utc_now_iso()
 
-        # BUG #3 FIX — increment total_interactions stat
         try:
             from services.container import admin_repo
             asyncio.create_task(asyncio.to_thread(admin_repo.increment_stat, "total_interactions"))
         except Exception:
             pass
 
-        # BUG #8 FIX — read the response text set by the handler
         bot_response_text = _bot_response_ctx.get("")
 
         LoggingService.log_event(
@@ -186,7 +175,6 @@ async def run_intent_job(
     except Exception as e:
         latency_ms = int((time.time() - t_start) * 1000)
 
-        # BUG #3 FIX — increment total_errors stat
         try:
             from services.container import admin_repo
             asyncio.create_task(asyncio.to_thread(admin_repo.increment_stat, "total_errors"))

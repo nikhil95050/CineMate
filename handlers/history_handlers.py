@@ -23,10 +23,10 @@ def _pagination_keyboard(prefix: str, page: int, total_pages: int) -> Optional[D
 
     row: List[Dict[str, str]] = []
     if page > 1:
-        row.append({"text": "◀ Prev", "callback_data": f"{prefix}_p{page - 1}"})
+        row.append({"text": "\u25c4 Prev", "callback_data": f"{prefix}_p{page - 1}"})
     row.append({"text": f"{page}/{total_pages}", "callback_data": f"{prefix}_p{page}"})
     if page < total_pages:
-        row.append({"text": "Next ▶", "callback_data": f"{prefix}_p{page + 1}"})
+        row.append({"text": "Next \u25ba", "callback_data": f"{prefix}_p{page + 1}"})
     return {"inline_keyboard": [row]}
 
 
@@ -35,7 +35,9 @@ def _parse_page(input_text: str, prefix: str) -> int:
     token = f"{prefix}_p"
     if text.startswith(token):
         try:
-            return max(1, int(text.split("_p", 1)[1]))
+            # Use len(token) slice instead of split("_p") to avoid mis-parsing
+            # prefixes that themselves contain "_p" (e.g. "top_picks_p2").
+            return max(1, int(text[len(token):]))
         except (IndexError, ValueError):
             return 1
     return 1
@@ -174,7 +176,7 @@ async def handle_save(
     if container.movie_service.is_in_watchlist(chat_id_str, movie.movie_id):
         if callback_query_id:
             await answer_callback_query(callback_query_id, text="Already saved.")
-        await send_message(chat_id, f"💾 <b>{movie.title}</b> is already in your watchlist.")
+        await send_message(chat_id, f"\U0001f4be <b>{movie.title}</b> is already in your watchlist.")
         return
 
     saved = container.movie_service.add_to_watchlist(chat_id_str, movie)
@@ -185,9 +187,9 @@ async def handle_save(
         )
 
     if saved:
-        await send_message(chat_id, f"💾 Saved <b>{movie.title}</b> to your watchlist.")
+        await send_message(chat_id, f"\U0001f4be Saved <b>{movie.title}</b> to your watchlist.")
     else:
-        await send_message(chat_id, "⚠️ I couldn't save that movie right now. Please try again.")
+        await send_message(chat_id, "\u26a0\ufe0f I couldn't save that movie right now. Please try again.")
 
 
 async def handle_watched(
@@ -224,7 +226,7 @@ async def handle_watched(
             await answer_callback_query(callback_query_id, text="Invalid movie ID.")
         await send_message(
             chat_id,
-            "✅ Use <code>/watched Movie Title</code> or tap the Watched button on a card.",
+            "\u2705 Use <code>/watched Movie Title</code> or tap the Watched button on a card.",
         )
         return
 
@@ -242,17 +244,28 @@ async def handle_watched(
     if updated:
         await send_message(
             chat_id,
-            f"✔ <b>{movie_title or movie_id}</b> marked as watched!",
+            f"\u2714 <b>{movie_title or movie_id}</b> marked as watched!",
         )
     else:
-        await send_message(chat_id, "⚠️ I couldn't update that movie right now. Please try again.")
+        await send_message(chat_id, "\u26a0\ufe0f I couldn't update that movie right now. Please try again.")
 
 
 async def handle_clear_history(
     chat_id: Any,
     **kwargs,
 ) -> None:
-    await send_message(
-        chat_id,
-        "ℹ️ History clearing isn't available in this build yet. Use /reset to start a fresh question flow.",
-    )
+    # ISSUE 5 FIX: implement the handler instead of leaving it as a stub.
+    # Deletes all history rows for the user via the repository and invalidates
+    # the Redis cache prefix so stale pages are not served.
+    chat_id_str = str(chat_id)
+    try:
+        repo = container.movie_service.history_repo
+        if repo is not None:
+            repo.clear_history(chat_id_str)
+        await send_message(chat_id, "\U0001f5d1\ufe0f Your watch history has been cleared.")
+    except Exception as exc:
+        logger.warning("[handle_clear_history] failed for %s: %s", chat_id_str, exc)
+        await send_message(
+            chat_id,
+            "\u26a0\ufe0f Couldn't clear history right now. Please try again.",
+        )

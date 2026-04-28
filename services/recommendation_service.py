@@ -35,8 +35,15 @@ def _movie_passes_filters(
 ) -> bool:
     if movie.movie_id in excluded_ids:
         return False
-    if min_rating and movie.rating and movie.rating < min_rating:
-        return False
+    # ISSUE 4 FIX: movie.rating is stored as str (e.g. "7.5" from OMDb).
+    # Comparing str < float raises TypeError in Python 3.  Always cast to
+    # float before comparing; skip the filter if the value is not numeric.
+    if min_rating and movie.rating:
+        try:
+            if float(movie.rating) < min_rating:
+                return False
+        except (ValueError, TypeError):
+            pass
     if disliked_genres and movie.genres:
         movie_genre_set = {g.strip().lower() for g in movie.genres.split(",")}
         if any(dg.lower() in movie_genre_set for dg in disliked_genres):
@@ -115,14 +122,8 @@ class RecommendationService:
             except Exception as hist_exc:
                 logger.warning("[RecService] history write failed: %s", hist_exc)
 
-        # Fix #12: mutate the *session* passed in rather than fetching a fresh
-        # one from the DB. A fresh fetch loses any sim_depth increment (or other
-        # in-flight state changes) the caller applied before invoking this method.
         if chat_id and session is not None:
             from services.container import session_service  # deferred to avoid import cycles
-            # Fix #16: use model_dump(mode='json') so nested Pydantic objects
-            # (e.g. StreamingInfo) are serialised to plain dicts/scalars, making
-            # the JSON string safe to round-trip through MovieModel(**m) later.
             session.last_recs_json = json.dumps([m.model_dump(mode="json") for m in enriched])
             session.overflow_buffer_json = json.dumps([m.model_dump(mode="json") for m in overflow])
             session_service.upsert_session(session)
@@ -153,14 +154,11 @@ class RecommendationService:
             batch = overflow[:BATCH_SIZE]
             rest = overflow[BATCH_SIZE:]
 
-            # Fix #16: overflow dicts were stored via model_dump(mode='json') so
-            # all values are plain JSON scalars. MovieModel(**m) rehydrates safely.
             enriched = await self._enrichment.enrich_movies(
                 [MovieModel(**m) for m in batch],
                 chat_id=chat_id or "system",
             )
 
-            # Write history for overflow batch
             if chat_id and enriched:
                 try:
                     from services.container import movie_service
@@ -170,7 +168,6 @@ class RecommendationService:
                 except Exception as hist_exc:
                     logger.warning("[RecService] overflow history write failed: %s", hist_exc)
 
-            # Fix #12: same pattern — mutate the passed-in session, do not re-fetch.
             if chat_id and session is not None:
                 new_last = _parse_json_list(session.last_recs_json) + [
                     m.model_dump(mode="json") for m in enriched
@@ -191,13 +188,18 @@ class RecommendationService:
         if session is None:
             return None
         raw = (session.answers_rating or "").strip().lower()
-        if raw == "any":
+        if not raw or raw in ("any", "[skipped]"):
             return None
-            
+        # ISSUE 4 (related): try parsing free-text numeric ratings (e.g. "7.5")
+        # before falling back to the fixed mapping or user preference.
+        try:
+            return float(raw)
+        except ValueError:
+            pass
         mapping = {"6+": 6.0, "7+": 7.0, "8+": 8.0, "9+": 9.0}
         val = mapping.get(raw)
         if val is not None:
             return val
         if user and user.avg_rating_preference:
-            return user.avg_rating_preference
+            return float(user.avg_rating_preference)
         return None

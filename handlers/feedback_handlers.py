@@ -1,11 +1,4 @@
-"""Handlers for like_*, dislike_*, and /min_rating callbacks.
-
-All handlers:
-  - log the reaction to FeedbackRepository.
-  - for dislikes: add genre(s) to user.disliked_genres.
-  - schedule a background call to UserService.recompute_taste_profile.
-  - never crash when feedback/history tables are empty.
-"""
+"""Handlers for like_*, dislike_*, and /min_rating callbacks."""
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +11,10 @@ from services.container import feedback_repo, history_repo  # noqa: F401
 
 logger = logging.getLogger("feedback_handlers")
 
+# ISSUE 3 FIX: hold strong references to background futures so the GC cannot
+# cancel them before recompute_taste_profile finishes executing.
+_background_tasks: set = set()
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -27,8 +24,14 @@ def _schedule_taste_recompute(chat_id: str) -> None:
     """Fire-and-forget: recompute taste profile without blocking the handler."""
     try:
         loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, user_service.recompute_taste_profile, chat_id)
+        # ISSUE 3 FIX: store the future in _background_tasks so it is never
+        # garbage-collected before the thread finishes.  The discard callback
+        # releases the reference once the executor completes.
+        fut = loop.run_in_executor(None, user_service.recompute_taste_profile, chat_id)
+        _background_tasks.add(fut)
+        fut.add_done_callback(_background_tasks.discard)
     except RuntimeError:
+        # No running loop (e.g. called from a sync test context) — run inline.
         try:
             user_service.recompute_taste_profile(chat_id)
         except Exception as exc:
@@ -63,11 +66,6 @@ def _resolve_movie_info(
         pass
 
     # 2. Try history repository.
-    # Fix #6 — get_movie_from_history ALWAYS returns a MovieModel (or None),
-    # never a plain dict.  The old code used a hasattr / dict(row) fallback
-    # that masked the bug and would still fail on a Pydantic model because
-    # dict(model) produces {field: FieldInfo} in Pydantic v2, not field values.
-    # Always call .model_dump() (v2) or .dict() (v1) explicitly.
     try:
         row = movie_service.get_movie_from_history(chat_id, movie_id)
         if row is not None:
@@ -75,7 +73,6 @@ def _resolve_movie_info(
                 return row.model_dump()
             if hasattr(row, "dict"):         # Pydantic v1
                 return row.dict()
-            # Genuine plain dict (defensive — should not happen with current service)
             if isinstance(row, dict):
                 return row
     except Exception:
@@ -100,32 +97,28 @@ async def handle_like(
     if not movie_id:
         if callback_query_id:
             await answer_callback_query(
-                callback_query_id, text="⚠️ Invalid movie ID."
+                callback_query_id, text="\u26a0\ufe0f Invalid movie ID."
             )
         return
 
     chat_id_str = str(chat_id)
 
-    # Resolve title for user-facing message
     info = _resolve_movie_info(chat_id_str, movie_id, session)
     title = info.get("title") or movie_id
 
-    # Log reaction
     try:
         from services.container import feedback_repo as fb_repo
         fb_repo.log_reaction(chat_id_str, movie_id, "like")
     except Exception as exc:
         logger.warning("[handle_like] log_reaction failed: %s", exc)
 
-    # Acknowledge callback
-    msg = f"👍 Liked <b>{title}</b>! I'll find you more like this."
+    msg = f"\U0001f44d Liked <b>{title}</b>! I'll find you more like this."
     if callback_query_id:
         await answer_callback_query(
-            callback_query_id, text=f"👍 Liked {title}!", show_alert=False
+            callback_query_id, text=f"\U0001f44d Liked {title}!", show_alert=False
         )
     await send_message(chat_id, msg)
 
-    # Schedule background taste recompute
     _schedule_taste_recompute(chat_id_str)
 
 
@@ -145,25 +138,22 @@ async def handle_dislike(
     if not movie_id:
         if callback_query_id:
             await answer_callback_query(
-                callback_query_id, text="⚠️ Invalid movie ID."
+                callback_query_id, text="\u26a0\ufe0f Invalid movie ID."
             )
         return
 
     chat_id_str = str(chat_id)
 
-    # Resolve genres for disliked_genres update
     info = _resolve_movie_info(chat_id_str, movie_id, session)
     title = info.get("title") or movie_id
     genres_raw: str = info.get("genres") or ""
 
-    # Log reaction
     try:
         from services.container import feedback_repo as fb_repo
         fb_repo.log_reaction(chat_id_str, movie_id, "dislike")
     except Exception as exc:
         logger.warning("[handle_dislike] log_reaction failed: %s", exc)
 
-    # Update disliked_genres on user profile
     if genres_raw:
         try:
             new_genres = [g.strip() for g in genres_raw.split(",") if g.strip()]
@@ -179,15 +169,13 @@ async def handle_dislike(
                 "[handle_dislike] disliked_genres update failed: %s", exc
             )
 
-    # Acknowledge callback
-    msg = f"👎 Got it — I'll recommend fewer movies like <b>{title}</b>."
+    msg = f"\U0001f44e Got it \u2014 I'll recommend fewer movies like <b>{title}</b>."
     if callback_query_id:
         await answer_callback_query(
-            callback_query_id, text=f"👎 Noted — fewer like {title}.", show_alert=False
+            callback_query_id, text=f"\U0001f44e Noted \u2014 fewer like {title}.", show_alert=False
         )
     await send_message(chat_id, msg)
 
-    # Schedule background taste recompute
     _schedule_taste_recompute(chat_id_str)
 
 
@@ -204,7 +192,6 @@ async def handle_min_rating(
     chat_id_str = str(chat_id)
     text = (input_text or "").strip()
 
-    # Strip command prefix(es)
     for prefix in ("/min_rating ", "/rating ", "min_rating ", "rating "):
         if text.lower().startswith(prefix):
             text = text[len(prefix):].strip()
@@ -212,20 +199,19 @@ async def handle_min_rating(
     else:
         await send_message(
             chat_id,
-            "⭐ <b>Set Minimum Rating</b>\n\n"
+            "\u2b50 <b>Set Minimum Rating</b>\n\n"
             "Usage: <code>/min_rating 7.5</code>\n"
             "Accepts any value from <b>0</b> to <b>10</b>.\n\n"
             "Movies below this rating will be excluded from recommendations.",
         )
         return
 
-    # Parse and validate
     try:
         value = float(text)
     except ValueError:
         await send_message(
             chat_id,
-            f"⚠️ <b>{text!r}</b> is not a valid number.\n"
+            f"\u26a0\ufe0f <b>{text!r}</b> is not a valid number.\n"
             "Please use a value between 0 and 10, e.g. <code>/min_rating 7.5</code>",
         )
         return
@@ -233,23 +219,22 @@ async def handle_min_rating(
     if not (0.0 <= value <= 10.0):
         await send_message(
             chat_id,
-            f"⚠️ Rating must be between <b>0</b> and <b>10</b>. You entered <b>{value}</b>.",
+            f"\u26a0\ufe0f Rating must be between <b>0</b> and <b>10</b>. You entered <b>{value}</b>.",
         )
         return
 
-    # Persist
     try:
         user_service.update_min_rating(chat_id_str, value)
     except Exception as exc:
         logger.warning("[handle_min_rating] update_min_rating failed: %s", exc)
         await send_message(
             chat_id,
-            "⚠️ Couldn't save your rating preference right now — please try again.",
+            "\u26a0\ufe0f Couldn't save your rating preference right now \u2014 please try again.",
         )
         return
 
     await send_message(
         chat_id,
-        f"✅ Minimum rating set to <b>{value:.1f}</b> ⭐\n"
+        f"\u2705 Minimum rating set to <b>{value:.1f}</b> \u2b50\n"
         "Future recommendations will only include movies at or above this rating.",
     )

@@ -12,10 +12,6 @@ from typing import Any, Dict, List, Optional
 
 from models.domain import MovieModel, UserModel, SessionModel
 
-# Formatting helpers live in utils/formatters.py (pure presentation layer).
-# Re-exported here so existing imports of the form
-#   from services.movie_service import format_history_list
-# continue to work without change.
 from utils.formatters import format_history_list, format_watchlist_list  # noqa: F401
 
 logger = logging.getLogger("movie_service")
@@ -56,7 +52,6 @@ class MovieService:
     def get_history(
         self, chat_id: str, page: int = 1
     ) -> List[Dict[str, Any]]:
-        """Return raw history dicts for formatting (pagination layer)."""
         if not self.history_repo:
             return []
         try:
@@ -70,7 +65,7 @@ class MovieService:
             return 1
         try:
             total = self.history_repo.get_total_count(chat_id)
-            return max(1, -(-total // PAGE_SIZE))  # ceiling division
+            return max(1, -(-total // PAGE_SIZE))
         except Exception:
             return 1
 
@@ -88,7 +83,6 @@ class MovieService:
     def get_movie_from_history(
         self, chat_id: str, movie_id: str
     ) -> Optional[MovieModel]:
-        """Return the MovieModel for the given movie_id, or None."""
         if not self.history_repo:
             return None
         try:
@@ -105,11 +99,6 @@ class MovieService:
     # ------------------------------------------------------------------
 
     def is_in_watchlist(self, chat_id: str, movie_id: str) -> bool:
-        """Check whether a movie is already in the watchlist.
-
-        Encapsulates watchlist_repo access so handlers never touch the
-        repository directly — spec requires all repo access via MovieService.
-        """
         if not self.watchlist_repo:
             return False
         try:
@@ -133,7 +122,6 @@ class MovieService:
     def get_watchlist(
         self, chat_id: str, page: int = 1
     ) -> List[Dict[str, Any]]:
-        """Return raw watchlist dicts for formatting (pagination layer)."""
         if not self.watchlist_repo:
             return []
         try:
@@ -154,7 +142,6 @@ class MovieService:
     def get_random_watchlist_reminder(
         self, chat_id: str
     ) -> Optional[MovieModel]:
-        """Return a random watchlist MovieModel, or None if the list is empty."""
         if not self.watchlist_repo:
             return None
         try:
@@ -207,43 +194,15 @@ class HistoryService:
 
 
 # ---------------------------------------------------------------------------
-# UserService / SessionService
+# ISSUE 6 FIX: removed the duplicate stripped UserService and SessionService
+# stubs that were previously defined here.  Any code that accidentally
+# imported UserService or SessionService from this module would have silently
+# received versions missing recompute_taste_profile, update_min_rating,
+# reset_session, and all feedback/history dependencies.
+#
+# The canonical implementations live in:
+#   services/user_service.py    -> UserService
+#   services/session_service.py -> SessionService
+#
+# container.py already imports from those correct modules.
 # ---------------------------------------------------------------------------
-
-class UserService:
-    def __init__(self, user_repo: Any | None = None) -> None:
-        self.user_repo = user_repo
-
-    def get_user(self, chat_id: str) -> UserModel:
-        if not self.user_repo:
-            return UserModel(chat_id=str(chat_id))
-        row = self.user_repo.get_user(chat_id)
-        return UserModel.from_row(row)
-
-    def upsert_user(self, user: UserModel) -> None:
-        if not self.user_repo:
-            return
-        self.user_repo.upsert_user(
-            user.chat_id, user.username, patch=user.to_row()
-        )
-
-
-class SessionService:
-    def __init__(self, session_repo: Any | None = None) -> None:
-        self.session_repo = session_repo
-
-    def get_session(self, chat_id: str) -> SessionModel:
-        if not self.session_repo:
-            return SessionModel(chat_id=str(chat_id))
-        row = self.session_repo.get_session(chat_id)
-        return SessionModel.from_row(row)
-
-    def upsert_session(self, session: SessionModel) -> None:
-        if not self.session_repo:
-            return
-        self.session_repo.upsert_session(session.chat_id, session.to_row())
-
-    def reset_session(self, chat_id: str) -> SessionModel:
-        session = SessionModel(chat_id=str(chat_id))
-        self.upsert_session(session)
-        return session

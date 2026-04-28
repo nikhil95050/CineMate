@@ -1,13 +1,4 @@
-"""Input normalization and intent detection for CineMate.
-
-This is a trimmed, dependency-light version of Antigravity's handlers.normalizer,
-kept focused on:
-  - normalizing Telegram updates into a consistent internal dict shape
-  - mapping raw text into a small set of high-level intents
-
-It is intentionally conservative so it stays compatible with future expansions
-(question engine, admin commands, etc.).
-"""
+"""Input normalization and intent detection for CineMate."""
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -26,8 +17,6 @@ def normalize_input(update: Dict[str, Any]) -> Dict[str, Any]:
       - callback_query_id
       - message_id
       - sent_at (ISO8601) when available
-
-    Unsupported update types will result in chat_id=None so callers can ignore.
     """
     result: Dict[str, Any] = {
         "update_id": update.get("update_id"),
@@ -74,11 +63,7 @@ def normalize_input(update: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def detect_intent(input_text: str, session: Optional[Dict[str, Any]] = None) -> str:
-    """Map raw input text to a logical bot intent.
-
-    This mirrors the intent mapping of Antigravity at a high level but keeps
-    only the core commands needed for early development.
-    """
+    """Map raw input text to a logical bot intent."""
     text = (input_text or "").lower().strip()
     if not text:
         return "fallback"
@@ -103,8 +88,15 @@ def detect_intent(input_text: str, session: Optional[Dict[str, Any]] = None) -> 
     if cmd == "/share":
         return "share"
 
-    # BUG FIX #2: use startswith so /trending@BotName and /trending <args>
-    # are handled correctly, not just the bare exact string.
+    # ISSUE 5 FIX: route /clear_history to the (now implemented) handler.
+    if cmd in ("/clear_history", "/clearhistory"):
+        return "clear_history"
+
+    # ISSUE 12 FIX: route /recommend to handle_recommend so it resets answers
+    # and starts the question flow cleanly, instead of falling to fallback.
+    if cmd == "/recommend":
+        return "recommend"
+
     if cmd == "/trending" or text == "trending":
         return "trending"
     if cmd == "/surprise" or text == "surprise":
@@ -128,8 +120,6 @@ def detect_intent(input_text: str, session: Optional[Dict[str, Any]] = None) -> 
     if text.startswith("dislike_"):
         return "dislike"
 
-    # BUG FIX #3: also match plain "more_suggestions" callback data sent by
-    # Telegram inline buttons (no slash prefix, no _action suffix).
     if text in ("/more_suggestions", "more_suggestions_action", "more_suggestions"):
         return "more_suggestions"
 
@@ -141,17 +131,11 @@ def detect_intent(input_text: str, session: Optional[Dict[str, Any]] = None) -> 
             return "reset"
         return "questioning"
 
-    # BUG FIX #1: admin commands — strip only the leading slash and take the
-    # first word so "/admin_broadcast hello world" → "admin_broadcast", not
-    # the full remaining string which never matches any intent in worker_service.
-    # Also match non-slash admin callbacks (e.g. inline button data like
-    # "admin_broadcast_confirm" or "admin_broadcast_cancel").
     if text.startswith("admin_"):
         return text.split()[0]
     if text.startswith("/admin_"):
         return text.split()[0].replace("/", "", 1)
 
-    # If the session says we are in questioning mode, keep sending to that flow
     if (session or {}).get("session_state") == "questioning":
         return "questioning"
 
