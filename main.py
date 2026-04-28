@@ -142,6 +142,13 @@ async def lifespan(app: FastAPI):
         error_batcher.shutdown()
     except Exception:
         pass
+    # M-1 FIX: close TelegramClient's httpx.AsyncClient to avoid
+    # "unclosed client session" warnings on shutdown.
+    try:
+        from clients.telegram_client import TelegramClient
+        await TelegramClient.get_instance().close()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="CineMate Bot API", lifespan=lifespan)

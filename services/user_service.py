@@ -62,13 +62,10 @@ class UserService:
 
         Algorithm:
           1. Load the most recent liked movie_ids from FeedbackRepository.
-          2. For each liked movie_id, look up the history row to get genres,
-             actors, and directors.
-          3. Count occurrences of each genre, actor, and director across all
-             liked movies.
+          2. For each liked movie_id, look up the history row to get genres.
+          3. Count occurrences of each genre across all liked movies.
           4. Store the top-N genres in UserModel.preferred_genres.
-          5. Write a user_taste_vector JSON blob with top genres, actors,
-             and directors.
+          5. Write a user_taste_vector JSON blob with top genres.
 
         Safe when feedback table is empty or history entries are missing —
         those cases simply result in no update being made.
@@ -95,10 +92,12 @@ class UserService:
             )
             return
 
-        # --- Step 2 & 3: gather genre/actor/director counts from history ---
+        # --- Step 2 & 3: gather genre counts from history ---
+        # H-4 FIX: actors/director columns do NOT exist in the history table.
+        # Previous code read history_row.get("actors") / .get("director") which
+        # always returned "" — making top_actors/top_directors permanently empty.
+        # Taste profiles are now genre-only until the schema is extended.
         genre_counter: Counter = Counter()
-        actor_counter: Counter = Counter()
-        director_counter: Counter = Counter()
         resolved_count = 0
 
         for fb_row in liked_rows:
@@ -125,23 +124,9 @@ class UserService:
                     if g:
                         genre_counter[g] += 1
 
-                # Actors — stored as comma-separated string in history row
-                actors_raw: str = history_row.get("actors", "") or ""
-                for a in actors_raw.split(","):
-                    a = a.strip()
-                    if a:
-                        actor_counter[a] += 1
-
-                # Directors — stored as comma-separated string in history row
-                directors_raw: str = history_row.get("director", "") or ""
-                for d in directors_raw.split(","):
-                    d = d.strip()
-                    if d:
-                        director_counter[d] += 1
-
                 resolved_count += 1
 
-        if not genre_counter and not actor_counter and not director_counter:
+        if not genre_counter:
             logger.debug(
                 "[UserService] recompute_taste_profile: no profile data resolved for %s",
                 chat_id,
@@ -150,16 +135,10 @@ class UserService:
 
         # --- Step 4 & 5: build and persist the profile ---
         top_genres: List[str] = [g for g, _ in genre_counter.most_common(_TOP_N)]
-        top_actors: List[str] = [a for a, _ in actor_counter.most_common(_TOP_N)]
-        top_directors: List[str] = [d for d, _ in director_counter.most_common(_TOP_N)]
 
         taste_vector: Dict[str, Any] = {
             "top_genres": top_genres,
-            "top_actors": top_actors,
-            "top_directors": top_directors,
             "genre_counts": dict(genre_counter.most_common(20)),
-            "actor_counts": dict(actor_counter.most_common(20)),
-            "director_counts": dict(director_counter.most_common(20)),
             "liked_count": len(liked_rows),
             "resolved_count": resolved_count,
         }
@@ -171,11 +150,11 @@ class UserService:
             self.upsert_user(user)
             logger.info(
                 "[UserService] taste profile updated for %s — "
-                "top genres: %s | top actors: %s | top directors: %s",
+                "top genres: %s (from %d liked movies, %d resolved)",
                 chat_id,
                 top_genres,
-                top_actors,
-                top_directors,
+                len(liked_rows),
+                resolved_count,
             )
         except Exception as exc:
             logger.warning(

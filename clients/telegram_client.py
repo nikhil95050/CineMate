@@ -21,6 +21,11 @@ class TelegramClient:
             cls._instance = cls()
         return cls._instance
 
+    async def close(self) -> None:
+        """M-1 FIX: explicitly close the httpx.AsyncClient to avoid connection leak warnings."""
+        if self._client:
+            await self._client.aclose()
+
     @staticmethod
     def bot_token() -> str:
         return os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()

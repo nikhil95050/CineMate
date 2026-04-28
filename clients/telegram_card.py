@@ -14,7 +14,8 @@ _MAX_MSG_LEN = 3800
 
 
 def _star_rating(rating: Optional[float]) -> str:
-    if not rating:
+    # C-2 FIX: 0.0 is falsy — use 'is None' to avoid suppressing valid zero ratings.
+    if rating is None:
         return ""
     filled = round(rating / 2)  # scale 10 → 5 stars
     return "⭐" * filled + f" {rating:.1f}"
@@ -44,8 +45,12 @@ def build_movie_card_text(movie: Dict[str, Any]) -> str:
         header += f" ({year})"
     lines.append(header)
 
-    if rating:
-        lines.append(_star_rating(float(rating)))
+    if rating is not None:
+        # C-1 FIX: OMDb may return "N/A" or "Not Rated" — guard against ValueError.
+        try:
+            lines.append(_star_rating(float(rating)))
+        except (ValueError, TypeError):
+            pass
     if genres:
         lines.append(f"🎭 {genres}")
     if language and language.lower() not in ("english", "n/a", ""):

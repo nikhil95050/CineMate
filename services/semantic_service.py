@@ -83,9 +83,14 @@ class SemanticService:
             return cached
 
         # 2. Health/feature-flag guard
-        if self._health is not None and not self._health.is_healthy("perplexity"):
-            logger.warning("[Semantic] Perplexity unhealthy – returning unknown")
-            return "unknown"
+        # H-3 FIX: is_healthy() calls sync Supabase HTTP — must run in a thread
+        # to avoid blocking the event loop. All API clients already do this.
+        if self._health is not None:
+            import asyncio
+            is_ok = await asyncio.to_thread(self._health.is_healthy, "perplexity")
+            if not is_ok:
+                logger.warning("[Semantic] Perplexity unhealthy – returning unknown")
+                return "unknown"
 
         # 3. LLM call with model fallback chain
         try:

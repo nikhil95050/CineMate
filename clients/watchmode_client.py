@@ -76,7 +76,9 @@ async def get_streaming_sources(imdb_id: str, chat_id: str = "system") -> List[D
                 f"{WATCHMODE_URL}/title/{title_id}/sources/",
                 params={"apiKey": api_key},
             )
-            sources = src_resp.json() if isinstance(src_resp.json(), list) else []
+            # C-3 FIX: parse JSON once to avoid double-parse CPU waste and confusing errors.
+            parsed = src_resp.json()
+            sources = parsed if isinstance(parsed, list) else []
 
         # ── Success path ─────────────────────────────────────────────────
         if hs is not None:

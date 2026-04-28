@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import urllib.parse
-import weakref
 from typing import List, Optional
 
 from clients import watchmode_client
@@ -29,7 +28,10 @@ _YOUTUBE_SEARCH = "https://www.youtube.com/results?search_query="
 
 # Module-level singleton -- shared with discovery_service.
 _metadata_repo = MovieMetadataRepository()
-_background_tasks: weakref.WeakSet = weakref.WeakSet()
+# H-2 FIX: changed from WeakSet to set() — WeakSet allows GC to cancel
+# running tasks before _persist_streaming() finishes.  A strong set keeps
+# the task alive until done_callback discards it.
+_background_tasks: set = set()
 
 
 def _trailer_search_url(movie: MovieModel) -> str:
@@ -133,10 +135,10 @@ class EnrichmentService:
                     # --- Write-through cache: persist raw sources to movie_metadata ---
                     # Fire-and-forget so it never delays the user response.
                     # We hold a reference in _background_tasks to prevent GC.
+                    # H-1 FIX: asyncio.ensure_future() is deprecated since 3.10;
+                    # asyncio.create_task() is the correct API.
                     persist_coro = self._persist_streaming(movie.movie_id, sources)
-                    task = asyncio.ensure_future(persist_coro)
-                    if not asyncio.isfuture(task):
-                        persist_coro.close()
+                    task = asyncio.create_task(persist_coro)
                     _background_tasks.add(task)
                     task.add_done_callback(_background_tasks.discard)
                 else:

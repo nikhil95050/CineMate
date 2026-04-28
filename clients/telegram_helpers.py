@@ -74,22 +74,6 @@ async def send_message_safely(
         return None
 
 
-async def send_message_with_keyboard(
-    chat_id: Any,
-    text: str,
-    reply_markup: Optional[Any] = None,
-    parse_mode: str = "HTML",
-    **kwargs,
-) -> Optional[Any]:
-    return await send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode=parse_mode,
-        reply_markup=reply_markup,
-        **kwargs,
-    )
-
-
 async def edit_message(
     chat_id: Any,
     message_id: Any,
