@@ -12,7 +12,6 @@ from typing import Any, Optional
 from clients.telegram_client import TelegramClient
 
 logger = logging.getLogger("telegram_helpers")
-BASE_URL = TelegramClient.base_url()
 
 
 def _normalise_reply_markup(reply_markup: Optional[Any]) -> Optional[Any]:

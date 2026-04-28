@@ -124,8 +124,8 @@ class SessionRepository:
                 rows, error = sb.select_rows(TABLE, filters={"chat_id": chat_id}, limit=1)
                 if not error and rows:
                     row = rows[0]
-                    # BUG #5 FIX: ensure JSON text columns are proper lists
-                    # when surfacing to callers (keeps in-memory cache consistent).
+                    # BUG #5 FIX: ensure JSON text columns are valid JSON strings
+                    # when surfacing to callers (the DB stores them as text, not jsonb).
                     for col in _JSON_TEXT_COLS:
                         row[col] = _ensure_json_str(row.get(col, "[]"))
                     self._store[chat_id] = row  # update local cache

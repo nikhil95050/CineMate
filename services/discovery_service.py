@@ -25,7 +25,10 @@ supabase_client = _config.supabase_client
 
 from models.domain import MovieModel, SessionModel, UserModel
 from repositories.movie_metadata_repository import MovieMetadataRepository
-from services.container import movie_metadata_repo
+# Lazy accessor to avoid circular import: container.py → discovery_service.py → container.py
+def _get_metadata_repo() -> MovieMetadataRepository:
+    from services.container import movie_metadata_repo
+    return movie_metadata_repo
 from services.logging_service import get_logger, error_batcher
 from utils.time_utils import utc_now_iso
 
@@ -33,7 +36,15 @@ logger = get_logger("discovery")
 
 _LLM_CANDIDATE_COUNT = 14
 
-_metadata_repo = movie_metadata_repo
+# Module-level sentinel; replaced lazily on first use via _get_metadata_repo()
+_metadata_repo: MovieMetadataRepository | None = None
+
+
+def _ensure_metadata_repo() -> MovieMetadataRepository:
+    global _metadata_repo
+    if _metadata_repo is None:
+        _metadata_repo = _get_metadata_repo()
+    return _metadata_repo
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +376,7 @@ class DiscoveryService:
         self,
         metadata_repo: Optional[MovieMetadataRepository] = None,
     ) -> None:
-        self._metadata_repo = metadata_repo or _metadata_repo
+        self._metadata_repo = metadata_repo or _ensure_metadata_repo()
 
     # ------------------------------------------------------------------
     # Star filmography
@@ -476,7 +487,7 @@ class DiscoveryService:
             return await _fetch_from_metadata_db(
                 mode=mode, session=session, user=user,
                 seed_title=seed_title, chat_id=chat_id,
-                repo=self._metadata_repo if self._metadata_repo is not _metadata_repo else None,
+                repo=self._metadata_repo,
             )
 
         items = _extract_json_array(raw)
@@ -497,7 +508,7 @@ class DiscoveryService:
             return await _fetch_from_metadata_db(
                 mode=mode, session=session, user=user,
                 seed_title=seed_title, chat_id=chat_id,
-                repo=self._metadata_repo if self._metadata_repo is not _metadata_repo else None,
+                repo=self._metadata_repo,
             )
 
         stubs: List[MovieModel] = [m for item in items if (m := _llm_item_to_movie(item))]
@@ -537,7 +548,7 @@ class DiscoveryService:
             return await _fetch_from_metadata_db(
                 mode=mode, session=session, user=user,
                 seed_title=seed_title, chat_id=chat_id,
-                repo=self._metadata_repo if self._metadata_repo is not _metadata_repo else None,
+                repo=self._metadata_repo,
             )
 
         return result

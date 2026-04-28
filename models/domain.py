@@ -255,6 +255,17 @@ class MovieModel(BaseModel):
             "genres": self.genres or ", ".join(self.genre_list),
         }
 
+    @classmethod
+    def from_watchlist_row(cls, row: Dict[str, Any]) -> "MovieModel":
+        """Build a MovieModel from a watchlist DB row.
+
+        Watchlist rows share the same column subset as history rows
+        (movie_id, title, year, rating, genres, language) so we delegate
+        to from_history_row.  Having a dedicated method makes call sites
+        self-documenting and future-proof if the schemas diverge.
+        """
+        return cls.from_history_row(row)
+
 
 class UserModel(BaseModel):
     """User profile used throughout the bot.

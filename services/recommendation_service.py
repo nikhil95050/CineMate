@@ -117,8 +117,7 @@ class RecommendationService:
         if chat_id and enriched:
             try:
                 from services.container import movie_service  # deferred to avoid import cycles
-                history_rows = [m.to_history_row(chat_id) for m in enriched]
-                movie_service.history_repo.log_recommendations(chat_id, history_rows)
+                movie_service.add_to_history(chat_id, enriched)
             except Exception as hist_exc:
                 logger.warning("[RecService] history write failed: %s", hist_exc)
 
@@ -162,9 +161,7 @@ class RecommendationService:
             if chat_id and enriched:
                 try:
                     from services.container import movie_service
-                    movie_service.history_repo.log_recommendations(
-                        chat_id, [m.to_history_row(chat_id) for m in enriched]
-                    )
+                    movie_service.add_to_history(chat_id, enriched)
                 except Exception as hist_exc:
                     logger.warning("[RecService] overflow history write failed: %s", hist_exc)
 

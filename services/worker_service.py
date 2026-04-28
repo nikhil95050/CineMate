@@ -9,7 +9,6 @@ from typing import Any, Dict
 
 from models import SessionModel, UserModel
 from services.logging_service import LoggingService
-from services.container import admin_repo
 from utils.time_utils import utc_now_iso
 
 _bot_response_ctx: ContextVar[str] = ContextVar("bot_response_text", default="")

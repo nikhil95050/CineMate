@@ -108,6 +108,14 @@ async def lifespan(app: FastAPI):
     # as a background task when an event loop is already running.
     asyncio.create_task(_keepalive_loop())
     yield
+    # I-10 FIX: flush all buffered log batches before process exit so no
+    # interaction or error log rows are silently dropped.
+    try:
+        from services.logging_service import interaction_batcher, error_batcher
+        interaction_batcher.shutdown()
+        error_batcher.shutdown()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="CineMate Bot API", lifespan=lifespan)

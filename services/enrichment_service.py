@@ -185,22 +185,12 @@ class EnrichmentService:
         Every input movie is guaranteed to appear in the output -- failures only
         mean that streaming/trailer fields may be missing or set to fallback values.
 
-        Implementation note: we look up _enrich_one through type(self) and call it
-        as a plain function passing (m, chat_id=chat_id). This means:
-          - In production: type(self)._enrich_one is the real method, called without
-            self -- so we pass self explicitly as the first arg via a lambda wrapper.
-          - In tests: patch() replaces type(self)._enrich_one with a plain async
-            function selective_enrich(movie, **kwargs). Calling it as
-            _enrich_one_fn(m, chat_id=chat_id) maps correctly with no self clash.
         """
-        _enrich_one_fn = type(self)._enrich_one
-
         async def _call(m: MovieModel):
             try:
-                return await _enrich_one_fn(m, chat_id=chat_id)
-            except TypeError:
-                # Real unbound method needs self as first arg
-                return await _enrich_one_fn(self, m, chat_id=chat_id)
+                return await self._enrich_one(m, chat_id=chat_id)
+            except Exception:
+                return m  # never drop a movie
 
         tasks = [_call(m) for m in movies]
         results = await asyncio.gather(*tasks, return_exceptions=True)
