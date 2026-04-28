@@ -16,6 +16,10 @@ from utils.formatters import format_history_list, format_watchlist_list
 
 logger = get_logger("history_handlers")
 
+# ISSUE 9 FIX: cap the number of Supabase pages scanned in handle_watched
+# text-search to avoid sequential DB calls timing out on Render's free tier.
+_MAX_WATCHED_SEARCH_PAGES = 5
+
 
 def _pagination_keyboard(prefix: str, page: int, total_pages: int) -> Optional[Dict[str, Any]]:
     if total_pages <= 1:
@@ -208,12 +212,19 @@ async def handle_watched(
     else:
         for prefix in ("/watched ", "watched "):
             if text.lower().startswith(prefix):
-                query = text[len(prefix) :].strip().lower()
+                query = text[len(prefix):].strip().lower()
                 total_pages = container.movie_service.get_history_page_count(chat_id_str)
-                for page in range(1, total_pages + 1):
+                # ISSUE 9 FIX: cap the scan to _MAX_WATCHED_SEARCH_PAGES pages
+                # so users with large histories don't trigger 20+ sequential
+                # Supabase calls that reliably timeout on Render's free tier.
+                search_limit = min(total_pages, _MAX_WATCHED_SEARCH_PAGES)
+                for page in range(1, search_limit + 1):
                     for row in container.movie_service.get_history(chat_id_str, page=page):
                         title = str(row.get("title") or "")
-                        if query == str(row.get("movie_id", "")).lower() or query in title.lower():
+                        if (
+                            query == str(row.get("movie_id", "")).lower()
+                            or query in title.lower()
+                        ):
                             movie_id = str(row.get("movie_id", ""))
                             movie_title = title
                             break
@@ -254,9 +265,6 @@ async def handle_clear_history(
     chat_id: Any,
     **kwargs,
 ) -> None:
-    # ISSUE 5 FIX: implement the handler instead of leaving it as a stub.
-    # Deletes all history rows for the user via the repository and invalidates
-    # the Redis cache prefix so stale pages are not served.
     chat_id_str = str(chat_id)
     try:
         repo = container.movie_service.history_repo

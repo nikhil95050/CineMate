@@ -42,7 +42,7 @@ def build_question_keyboard(session_row: Dict[str, Any]) -> Optional[Dict[str, A
         selected = set(_split_csv(session_model.answers_genre))
         current_row: List[Dict[str, str]] = []
         for option in options:
-            label = f"{'✓ ' if option in selected else ''}{option}"
+            label = f"{'\u2713 ' if option in selected else ''}{option}"
             current_row.append({"text": label, "callback_data": f"q_genre_{option}"})
             if len(current_row) == 2:
                 rows.append(current_row)
@@ -115,8 +115,20 @@ def _normalise_answer(question_key: str, answer: str) -> str:
 
 
 def _legacy_option_answer(session_model: SessionModel, input_text: str) -> Optional[str]:
-    suffix = input_text[2:]
+    # ISSUE 11 FIX: the old code did `suffix = input_text[2:]` which took
+    # everything after the first two characters of a "q_X" callback, making a
+    # subtle assumption about a single-char question key.  Any multi-char key
+    # (e.g. "q_era") would leave residual chars in suffix and .isdigit() would
+    # return False, silently rejecting valid callbacks.
+    #
+    # The correct approach: a legacy numeric callback has the form "q_<N>" where
+    # N is a 1-based integer with no further underscores.  We parse it via the
+    # prefix "q_" and verify that the remainder is a pure digit string.
+    if not input_text.startswith("q_"):
+        return None
+    suffix = input_text[2:]   # everything after "q_"
     if not suffix.isdigit():
+        # Not a legacy numeric callback — caller will handle it as unknown.
         return None
     question = get_next_question(session_model.question_index)
     if question is None:
@@ -150,8 +162,6 @@ async def _finalize(chat_id: Any, session_model: SessionModel) -> None:
     if movies:
         await send_movies_async(chat_id, movies)
     else:
-        # ISSUE 1 FIX: always give the user feedback when no results are found
-        # so the bot never appears frozen after completing all questions.
         await send_message(
             chat_id,
             "\U0001f614 I couldn't find great matches right now.\n\n"
@@ -272,7 +282,7 @@ async def handle_questioning(
     if raw.startswith("q_"):
         prefix = f"q_{question_key}_"
         if raw.startswith(prefix):
-            answer = raw[len(prefix) :].strip()
+            answer = raw[len(prefix):].strip()
         else:
             answer = _legacy_option_answer(session_model, raw)
             if answer is None:
@@ -322,8 +332,6 @@ async def handle_recommend(
     chat_id: Any,
     **kwargs,
 ) -> None:
-    # ISSUE 2 FIX: reset ALL answer fields and pending_question so stale
-    # answers from a prior session never contaminate a new recommendation flow.
     session_model = container.session_service.get_session(str(chat_id))
     session_model.session_state = "questioning"
     session_model.question_index = 0

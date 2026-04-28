@@ -1,17 +1,4 @@
-"""Handlers for /star and /share commands.
-
-/star <name>
-  - Calls DiscoveryService.get_star_movies(name)
-  - Adds results to history + updates last_recs
-  - Sends movie cards via send_movies_async
-  - Graceful fallback when star is unknown or LLM returns nothing
-
-/share
-  - Builds a formatted text card from session.last_recs_json
-  - Includes title, year, rating, genres, reason and streaming info
-  - Instructs the user to forward the message
-  - Graceful fallback when last_recs is empty
-"""
+"""Handlers for /star and /share commands."""
 from __future__ import annotations
 
 import json
@@ -22,7 +9,7 @@ from clients.telegram_helpers import send_message, show_typing
 from models.domain import MovieModel, SessionModel
 from services.container import (
     discovery_service,
-    history_service,
+    movie_service,
     rec_service,
     session_service,
     user_service,
@@ -37,25 +24,15 @@ logger = get_logger("discovery_handlers")
 # ---------------------------------------------------------------------------
 
 def _movie_to_dict(movie: MovieModel) -> Dict[str, Any]:
-    """Serialise a MovieModel to a plain dict exactly once.
-
-    All callers (session persistence, send_movies_async) share this single
-    serialisation so there is no repeated model_dump() round-trip and no
-    risk of a custom serialiser silently dropping fields on a second pass.
-    """
+    """Serialise a MovieModel to a plain dict exactly once."""
     return movie.model_dump()
 
 
 def _streaming_label(streaming: Any) -> str:
-    """Return a safe string label for a streaming value.
-
-    Accepts str, list, dict, or None without raising.  Returns an empty
-    string when the value carries no meaningful information.
-    """
+    """Return a safe string label for a streaming value."""
     if streaming is None:
         return ""
     if isinstance(streaming, dict):
-        # e.g. {"Netflix": "https://..."} — join keys as the display label
         label = ", ".join(str(k) for k in streaming if k)
     elif isinstance(streaming, list):
         label = ", ".join(str(s) for s in streaming if s)
@@ -78,7 +55,6 @@ async def handle_star(
     """Handle /star <actor or director name>."""
     text = (input_text or "").strip()
 
-    # Strip command prefix
     for prefix in ("/star ", "star "):
         if text.lower().startswith(prefix):
             star_name = text[len(prefix):].strip()
@@ -103,7 +79,6 @@ async def handle_star(
         f"\U0001f3ac Fetching <b>{star_name}</b>'s filmography\u2026",
     )
 
-    # --- Fetch movies ---------------------------------------------------------
     try:
         movies: List[MovieModel] = await discovery_service.get_star_movies(
             star_name=star_name,
@@ -113,7 +88,6 @@ async def handle_star(
         logger.warning("[handle_star] get_star_movies raised: %s", exc)
         movies = []
 
-    # --- Graceful fallback when nothing found --------------------------------
     if not movies:
         await send_message(
             chat_id,
@@ -124,30 +98,20 @@ async def handle_star(
         )
         return
 
-    # --- Serialise exactly once so all consumers share the same dict list ----
     movie_dicts: List[Dict[str, Any]] = [_movie_to_dict(m) for m in movies]
 
-    # --- Persist to history (per-movie, logged individually) -----------------
-    history_failures = 0
-    for movie in movies:
-        try:
-            history_service.add_to_history(chat_id_str, movie)
-        except Exception as exc:
-            history_failures += 1
-            logger.warning(
-                "[handle_star] history add failed for %s: %s",
-                getattr(movie, 'movie_id', '?'),
-                exc,
-            )
-    if history_failures:
+    # ISSUE 10 FIX: replaced per-movie history_service.add_to_history() loop
+    # (N individual Supabase upserts) with a single bulk call through
+    # movie_service.add_to_history() which calls log_recommendations() once.
+    try:
+        movie_service.add_to_history(chat_id_str, movies)
+    except Exception as exc:
         logger.warning(
-            "[handle_star] %d/%d movies failed to persist to history for chat_id=%s",
-            history_failures,
-            len(movies),
+            "[handle_star] bulk history add failed for chat_id=%s: %s",
             chat_id_str,
+            exc,
         )
 
-    # --- Update last_recs in session -----------------------------------------
     try:
         session_model: SessionModel = session_service.get_session(chat_id_str)
         session_model.last_recs_json = json.dumps(movie_dicts)
@@ -155,7 +119,6 @@ async def handle_star(
     except Exception as exc:
         logger.warning("[handle_star] session update failed: %s", exc)
 
-    # --- Send cards (reuse already-serialised dicts, no second model_dump) ---
     await send_movies_async(chat_id, movie_dicts)
 
 
@@ -163,19 +126,14 @@ async def handle_star(
 # /share
 # ---------------------------------------------------------------------------
 
-_MAX_SHARE_ITEMS = 5  # Cap to keep the card readable / forwardable
+_MAX_SHARE_ITEMS = 5
 
 
 def _build_share_card(
     recs: List[Dict[str, Any]],
     header: str = "\U0001f3ac My CineMate Picks",
 ) -> str:
-    """Build a nicely formatted text card from a list of movie dicts.
-
-    Each entry shows: title, year, rating, genres, reason, and streaming.
-    The card is designed to be forwarded directly in Telegram.
-    streaming may be a str, list, or dict — _streaming_label() handles all.
-    """
+    """Build a nicely formatted text card from a list of movie dicts."""
     lines: List[str] = [f"<b>{header}</b>", ""]
 
     for i, rec in enumerate(recs[:_MAX_SHARE_ITEMS], start=1):
@@ -187,7 +145,6 @@ def _build_share_card(
         streaming_raw = rec.get("streaming") or rec.get("streaming_platforms")
         streaming_label = _streaming_label(streaming_raw)
 
-        # Title line: "1. Inception (2010)  ⭐ 8.8"
         title_line = f"<b>{i}. {title}</b>"
         if year:
             title_line += f" ({year})"
@@ -198,19 +155,14 @@ def _build_share_card(
                 pass
         lines.append(title_line)
 
-        # Genres on own line if present
         if genres:
             lines.append(f"\U0001f3f7\ufe0f {genres}")
-
-        # Reason (curator note)
         if reason:
             lines.append(f"\U0001f4ac {reason}")
-
-        # Streaming info — only show when meaningful
         if streaming_label:
             lines.append(f"\U0001f4fa {streaming_label}")
 
-        lines.append("")  # blank separator
+        lines.append("")
 
     lines.append("\U0001f916 Powered by <b>CineMate</b> \u2014 your AI movie companion")
     lines.append("Forward this to a friend who loves movies! \U0001f44b")
@@ -227,7 +179,6 @@ async def handle_share(
     """Handle /share — build a forwardable recommendation card from last_recs."""
     chat_id_str = str(chat_id)
 
-    # --- Resolve last_recs from session -------------------------------------
     recs: List[Dict[str, Any]] = []
     try:
         session_model: SessionModel = session_service.get_session(chat_id_str)
@@ -237,7 +188,6 @@ async def handle_share(
     except Exception as exc:
         logger.warning("[handle_share] failed to load last_recs: %s", exc)
 
-    # --- Fallback when nothing to share ------------------------------------
     if not recs:
         await send_message(
             chat_id,
@@ -248,11 +198,9 @@ async def handle_share(
         )
         return
 
-    # --- Build and send the card -------------------------------------------
     card = _build_share_card(recs)
     await send_message(chat_id, card)
 
-    # Friendly follow-up
     count = min(len(recs), _MAX_SHARE_ITEMS)
     await send_message(
         chat_id,
