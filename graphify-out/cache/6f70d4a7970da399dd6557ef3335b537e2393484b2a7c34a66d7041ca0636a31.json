@@ -1,1 +1,0 @@
-{"nodes": [{"id": "conftest_py", "label": "conftest.py", "file_type": "code", "source_file": "conftest.py", "source_location": "L1"}], "edges": [{"source": "conftest_py", "target": "warnings", "relation": "imports", "confidence": "EXTRACTED", "source_file": "conftest.py", "source_location": "L6", "weight": 1.0}], "raw_calls": []}
