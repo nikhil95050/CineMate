@@ -1,0 +1,73 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="topbar"><h1>Users</h1></div>
+<div class="search-bar"><input type="text" id="user-search" placeholder="Search by username or chat ID..." onkeyup="loadUsers()"></div>
+<div class="card">
+    <table id="users-table">
+        <thead><tr><th>Chat ID</th><th>Username</th><th>Language</th><th>Era</th><th>Actions</th></tr></thead>
+        <tbody><tr><td colspan="5" class="loading">Loading...</td></tr></tbody>
+    </table>
+</div>
+<div class="card detail-panel" id="user-detail"><h3>User Detail</h3><div id="detail-content"></div></div>
+<script>
+async function loadUsers() {
+    const search = document.getElementById('user-search').value;
+    const resp = await fetch(`/admin/api/users?search=${encodeURIComponent(search)}`);
+    const data = await resp.json();
+    const tbody = document.querySelector('#users-table tbody');
+    tbody.innerHTML = data.users.map(u => `<tr>
+        <td><code>${u.chat_id}</code></td>
+        <td>${u.username || 'User'}</td>
+        <td>${u.preferred_language || '-'}</td>
+        <td>${u.preferred_era || '-'}</td>
+        <td><button class="btn btn-sm btn-primary" onclick="loadUserDetail('${u.chat_id}')">View</button></td>
+    </tr>`).join('');
+}
+async function loadUserDetail(chatId) {
+    const resp = await fetch(`/admin/api/users/${chatId}`);
+    const data = await resp.json();
+    const panel = document.getElementById('user-detail');
+    panel.classList.add('open');
+    const prefs = data.user || {};
+    const session = data.session || {};
+    const history = data.history || [];
+    const feedback = data.feedback || [];
+    const watchlist = data.watchlist || [];
+
+    document.getElementById('detail-content').innerHTML = `
+        <div class="tab-nav">
+            <button class="tab-btn active" onclick="switchTab('profile')">Profile</button>
+            <button class="tab-btn" onclick="switchTab('session')">Session</button>
+            <button class="tab-btn" onclick="switchTab('history')">History (${history.length})</button>
+            <button class="tab-btn" onclick="switchTab('feedback')">Feedback (${feedback.length})</button>
+            <button class="tab-btn" onclick="switchTab('watchlist')">Watchlist (${watchlist.length})</button>
+        </div>
+        <div class="tab-content active" id="tab-profile">
+            <p>Username: ${prefs.username || 'User'}</p>
+            <p>Genres: ${JSON.stringify(prefs.preferred_genres)}</p>
+            <p>Disliked: ${JSON.stringify(prefs.disliked_genres)}</p>
+            <p>Language: ${prefs.preferred_language || '-'}</p>
+            <p>Era: ${prefs.preferred_era || '-'}</p>
+            <p>Rating pref: ${prefs.avg_rating_preference || '-'}</p>
+            <p>Taste vector: <pre>${JSON.stringify(prefs.user_taste_vector, null, 2)}</pre></p>
+            <a href="/admin/api/users/${chatId}/export" class="btn btn-primary" style="margin-top:10px;display:inline-block;text-decoration:none;color:#fff;">Export Data</a>
+        </div>
+        <div class="tab-content" id="tab-session">
+            <p>State: ${session.session_state || 'idle'}</p>
+            <p>Question: ${session.question_index || 0}</p>
+            <div class="json-view"><pre>${JSON.stringify(session, null, 2)}</pre></div>
+        </div>
+        <div class="tab-content" id="tab-history">${history.map(h => `<p>${h.title} (${h.year}) - ${h.rating} - ${h.watched ? 'Watched' : ''}</p>`).join('') || '<p class="empty-state">No history</p>'}</div>
+        <div class="tab-content" id="tab-feedback">${feedback.map(f => `<p>${f.movie_id}: ${f.reaction_type}</p>`).join('') || '<p class="empty-state">No feedback</p>'}</div>
+        <div class="tab-content" id="tab-watchlist">${watchlist.map(w => `<p>${w.title} (${w.year})</p>`).join('') || '<p class="empty-state">Empty watchlist</p>'}</div>
+    `;
+}
+function switchTab(name) {
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    event.target.classList.add('active');
+}
+loadUsers();
+</script>
+{% endblock %}

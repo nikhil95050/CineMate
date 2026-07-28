@@ -145,8 +145,30 @@ class AdminRepository:
         return dict(_stats_store)
 
     def increment_stat(self, stat_name: str, by: int = 1) -> None:
-        """Upsert a metric_name / metric_value pair in bot_stats."""
+        """Atomically increment a metric using the increment_stat RPC function.
+
+        Uses PostgREST RPC call to eliminate the read-then-write race condition
+        that previously existed when doing SELECT + upsert separately.
+        Falls back to the old read-then-write method when RPC is unavailable.
+        """
         if sb.is_configured():
+            try:
+                rpc_url = f"{sb.REST_BASE}/rpc/increment_stat"
+                resp = sb._get_sync_client().post(
+                    rpc_url,
+                    headers=sb._headers(),
+                    json={"stat_name": stat_name, "increment_by": by},
+                )
+                if 200 <= resp.status_code < 300:
+                    return
+                logger.warning(
+                    "[AdminRepo] RPC increment_stat failed (status %d), trying fallback: %s",
+                    resp.status_code, resp.text[:200],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[AdminRepo] RPC increment_stat exception, trying fallback: %s", exc
+                )
             try:
                 existing = self.get_all_stats().get(stat_name, 0)
                 sb.upsert_rows(
@@ -155,7 +177,7 @@ class AdminRepository:
                     on_conflict="metric_name",
                 )
             except Exception as exc:
-                logger.warning("[AdminRepo] increment_stat exception: %s", exc)
+                logger.warning("[AdminRepo] fallback increment_stat exception: %s", exc)
         else:
             _stats_store[stat_name] = _stats_store.get(stat_name, 0) + by
 

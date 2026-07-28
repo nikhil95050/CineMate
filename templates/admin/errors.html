@@ -1,0 +1,35 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="topbar"><h1>Error Logs</h1></div>
+<div class="flex-row search-bar">
+    <input type="text" id="filter-type" placeholder="Error type..." style="max-width:200px;">
+    <input type="text" id="filter-chat" placeholder="Chat ID..." style="max-width:200px;">
+    <button class="btn btn-primary" onclick="load()">Filter</button>
+</div>
+<div class="card">
+    <table id="errors-table">
+        <thead><tr><th>Timestamp</th><th>Type</th><th>Chat ID</th><th>Step</th><th>Message</th></tr></thead>
+        <tbody><tr><td colspan="5" class="loading">Loading...</td></tr></tbody>
+    </table>
+</div>
+<script>
+async function load() {
+    const type = document.getElementById('filter-type').value;
+    const chat = document.getElementById('filter-chat').value;
+    let url = '/admin/api/errors?limit=100';
+    if (type) url += '&error_type=' + encodeURIComponent(type);
+    if (chat) url += '&chat_id=' + encodeURIComponent(chat);
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const tbody = document.querySelector('#errors-table tbody');
+    tbody.innerHTML = data.errors.map(e => `<tr>
+        <td>${(e.timestamp || '').slice(0,19)}</td>
+        <td><span class="badge badge-err">${e.error_type || ''}</span></td>
+        <td><code>${e.chat_id || ''}</code></td>
+        <td>${e.workflow_step || ''}</td>
+        <td style="max-width:300px;">${(e.error_message || '').slice(0,150)}</td>
+    </tr>`).join('');
+}
+load();
+</script>
+{% endblock %}

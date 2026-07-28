@@ -97,6 +97,7 @@ _DEFAULT_APP_CONFIG_ROWS = [
     {"key": "provider.omdb.enabled",       "value": "true"},
     {"key": "provider.watchmode.enabled",  "value": "true"},
     {"key": "provider.perplexity.enabled", "value": "true"},
+    {"key": "provider.tmdb.enabled",       "value": "true"},
     {"key": "bot.active",                  "value": "true"},
 ]
 

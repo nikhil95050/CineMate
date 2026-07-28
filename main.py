@@ -103,14 +103,8 @@ async def _keepalive_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # M-5 FIX: asyncio.ensure_future() is deprecated since Python 3.10+.
-    # asyncio.create_task() is the correct API for scheduling a coroutine
-    # as a background task when an event loop is already running.
     asyncio.create_task(_keepalive_loop())
 
-    # M-2 FIX: clean up stale daily call counters from app_config on startup.
-    # These keys have the form "provider.<name>.calls.<YYYY-MM-DD>" and
-    # accumulate one per provider per day, forever.
     try:
         from datetime import datetime, timedelta, timezone
         import config.supabase_client as sb
@@ -131,19 +125,21 @@ async def lifespan(app: FastAPI):
                         len(stale_keys),
                     )
     except Exception:
-        pass  # non-critical cleanup — never block startup
+        pass
+
+    try:
+        from services.metrics_service import start_metrics_aggregation
+        start_metrics_aggregation()
+    except Exception:
+        pass
 
     yield
-    # I-10 FIX: flush all buffered log batches before process exit so no
-    # interaction or error log rows are silently dropped.
     try:
         from services.logging_service import interaction_batcher, error_batcher
         interaction_batcher.shutdown()
         error_batcher.shutdown()
     except Exception:
         pass
-    # M-1 FIX: close TelegramClient's httpx.AsyncClient to avoid
-    # "unclosed client session" warnings on shutdown.
     try:
         from clients.telegram_client import TelegramClient
         await TelegramClient.get_instance().close()
@@ -153,8 +149,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="CineMate Bot API", lifespan=lifespan)
 
-# Register size-limit middleware AFTER app creation so it wraps all routes.
 app.add_middleware(RequestSizeLimitMiddleware)
+
+from admin.auth import AdminAuthMiddleware, is_configured as admin_configured
+from admin.router import router as admin_api_router
+from admin.views import views as admin_views_router
+
+if admin_configured():
+    app.add_middleware(AdminAuthMiddleware)
+    app.include_router(admin_api_router)
+    app.include_router(admin_views_router)
+    logger.info("[Admin] Admin website enabled at /admin")
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CineMate Admin - Login</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+        .login-card { background: #fff; border-radius: 12px; padding: 40px; width: 100%; max-width: 400px; box-shadow: 0 4px 24px rgba(0,0,0,0.3); }
+        .login-card h1 { font-size: 24px; margin-bottom: 8px; }
+        .login-card p { color: #888; margin-bottom: 24px; font-size: 14px; }
+        input { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; margin-bottom: 16px; }
+        input:focus { outline: none; border-color: #6c63ff; }
+        button { width: 100%; padding: 12px; background: #6c63ff; color: #fff; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; }
+        button:hover { opacity: 0.9; }
+        .error { background: #f8d7da; color: #721c24; padding: 10px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; display: none; }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <h1>CineMate Admin</h1>
+        <p>Enter the admin password to continue.</p>
+        <div class="error" id="error">Invalid password</div>
+        <input type="password" id="password" placeholder="Password" autofocus onkeydown="if(event.key==='Enter')login()">
+        <button onclick="login()">Sign In</button>
+    </div>
+    <script>
+        async function login() {
+            const password = document.getElementById('password').value;
+            const resp = await fetch('/admin/api/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({password})
+            });
+            if (resp.ok) {
+                window.location.href = '/admin/dashboard';
+            } else {
+                document.getElementById('error').style.display = 'block';
+            }
+        }
+    </script>
+</body>
+</html>

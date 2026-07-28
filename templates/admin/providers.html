@@ -1,0 +1,37 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="topbar"><h1>Provider Health</h1></div>
+<div class="provider-grid" id="provider-grid"><div class="loading">Loading...</div></div>
+<script>
+async function load() {
+    const resp = await fetch('/admin/api/stats');
+    const data = await resp.json();
+    const providers = data.providers || {};
+    const grid = document.getElementById('provider-grid');
+    grid.innerHTML = Object.entries(providers).map(([name, info]) => {
+        const state = info.state || 'unknown';
+        const status = info.last_failure_time ? 'Last failure: ' + info.last_failure_time.slice(0,19) : 'No recent failures';
+        return `<div class="provider-card">
+            <h4>${name}</h4>
+            <p><span class="badge badge-${state}">${state}</span></p>
+            <p style="font-size:12px;color:#888;margin-top:8px;">Calls today: ${info.daily_calls_today || 0} / ${info.daily_budget || '-'}</p>
+            <p style="font-size:12px;color:#888;">Failures: ${info.failure_count || 0}</p>
+            <p style="font-size:12px;color:#888;">${status}</p>
+            <div class="actions">
+                <button class="btn btn-sm btn-success" onclick="act('${name}','close')">Reset Circuit</button>
+                <button class="btn btn-sm btn-danger" onclick="act('${name}','open')">Open Circuit</button>
+                <button class="btn btn-sm" onclick="act('${name}','toggle')">Toggle Flag</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+async function act(name, action) {
+    await fetch(`/admin/api/provider/${name}`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action})
+    });
+    load();
+}
+load();
+</script>
+{% endblock %}

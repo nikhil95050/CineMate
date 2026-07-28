@@ -12,6 +12,7 @@ _TOKEN_COSTS: Dict[str, float] = {
     "openai":     0.002,
     "omdb":       0.0,
     "watchmode":  0.0,
+    "tmdb":       0.0,
 }
 
 

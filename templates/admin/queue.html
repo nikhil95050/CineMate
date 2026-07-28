@@ -1,0 +1,26 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="topbar"><h1>Queue Monitor</h1></div>
+<div class="stats-grid">
+    <div class="stat-card"><div class="value" id="stat-pending">-</div><div class="label">Pending</div></div>
+    <div class="stat-card"><div class="value" id="stat-active">-</div><div class="label">Active</div></div>
+    <div class="stat-card"><div class="value" id="stat-failed">-</div><div class="label">Failed</div></div>
+</div>
+<div class="card"><h3>Failed Jobs</h3><div id="failed-jobs"><div class="loading">Loading...</div></div></div>
+<script>
+async function load() {
+    const resp = await fetch('/admin/api/queue');
+    const data = await resp.json();
+    document.getElementById('stat-pending').textContent = data.pending || 0;
+    document.getElementById('stat-active').textContent = data.active || 0;
+    document.getElementById('stat-failed').textContent = data.failed || 0;
+    const jobs = data.jobs || [];
+    document.getElementById('failed-jobs').innerHTML = jobs.length
+        ? '<table><thead><tr><th>Job ID</th><th>Function</th><th>Error</th></tr></thead><tbody>' +
+          jobs.map(j => `<tr><td><code>${j.id}</code></td><td>${j.func || '-'}</td><td style="max-width:300px;">${j.error.slice(0,200)}</td></tr>`).join('') +
+          '</tbody></table>'
+        : '<div class="empty-state">No failed jobs</div>';
+}
+load();
+</script>
+{% endblock %}

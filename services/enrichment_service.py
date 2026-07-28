@@ -17,6 +17,7 @@ import urllib.parse
 from typing import List, Optional
 
 from clients import watchmode_client
+from clients.movie_data_provider import MovieDataProvider
 from models.domain import MovieModel
 from repositories.movie_metadata_repository import MovieMetadataRepository
 from services.logging_service import get_logger, error_batcher
@@ -28,6 +29,7 @@ _YOUTUBE_SEARCH = "https://www.youtube.com/results?search_query="
 
 # Module-level singleton -- shared with discovery_service.
 _metadata_repo = MovieMetadataRepository()
+_movie_data_provider = MovieDataProvider()
 # H-2 FIX: changed from WeakSet to set() — WeakSet allows GC to cancel
 # running tasks before _persist_streaming() finishes.  A strong set keeps
 # the task alive until done_callback discards it.
@@ -117,9 +119,20 @@ class EnrichmentService:
         """Enrich a single movie. Always returns a MovieModel -- never raises."""
         updates: dict = {}
 
-        # Trailer: always provide a YouTube search link as fallback
+        # Trailer: try TMDB first, fall back to YouTube search
         if not movie.trailer:
-            updates["trailer"] = _trailer_search_url(movie)
+            if movie.movie_id.startswith("tt") or movie.movie_id.startswith("tmdb_"):
+                try:
+                    clean_id = movie.movie_id.replace("tmdb_", "")
+                    trailer = await _movie_data_provider.get_trailers(
+                        movie_id=clean_id, chat_id=chat_id
+                    )
+                    if trailer:
+                        updates["trailer"] = trailer
+                except Exception:
+                    pass
+            if not updates.get("trailer"):
+                updates["trailer"] = _trailer_search_url(movie)
 
         # Streaming: only call Watchmode when we have a real IMDb ID
         if not movie.streaming and movie.movie_id.startswith("tt"):
@@ -132,17 +145,11 @@ class EnrichmentService:
 
                 if summary:
                     updates["streaming"] = summary
-                    # --- Write-through cache: persist raw sources to movie_metadata ---
-                    # Fire-and-forget so it never delays the user response.
-                    # We hold a reference in _background_tasks to prevent GC.
-                    # H-1 FIX: asyncio.ensure_future() is deprecated since 3.10;
-                    # asyncio.create_task() is the correct API.
                     persist_coro = self._persist_streaming(movie.movie_id, sources)
                     task = asyncio.create_task(persist_coro)
                     _background_tasks.add(task)
                     task.add_done_callback(_background_tasks.discard)
                 else:
-                    # Watchmode returned nothing -- try the cache before giving up
                     cached = await self._get_streaming_from_cache(movie.movie_id)
                     if cached:
                         updates["streaming"] = cached
@@ -163,7 +170,6 @@ class EnrichmentService:
                     movie.movie_id,
                     exc,
                 )
-                # Attempt cache recovery before returning without streaming info
                 try:
                     cached = await self._get_streaming_from_cache(movie.movie_id)
                     if cached:
@@ -173,7 +179,7 @@ class EnrichmentService:
                             movie.movie_id,
                         )
                 except Exception:
-                    pass  # Cache also failed -- movie returned without streaming
+                    pass
 
         if updates:
             return movie.model_copy(update=updates)

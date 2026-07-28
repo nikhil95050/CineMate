@@ -1,0 +1,83 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="topbar">
+    <h1>Dashboard</h1>
+</div>
+
+<div class="stats-grid" id="stats-cards">
+    <div class="stat-card"><div class="value" id="stat-users">-</div><div class="label">Total Users</div></div>
+    <div class="stat-card"><div class="value" id="stat-recs">-</div><div class="label">Recs Today</div></div>
+    <div class="stat-card"><div class="value" id="stat-interactions">-</div><div class="label">Interactions</div></div>
+    <div class="stat-card"><div class="value" id="stat-errors">-</div><div class="label">Errors</div></div>
+    <div class="stat-card"><div class="value" id="stat-queue">-</div><div class="label">Queue Pending</div></div>
+</div>
+
+<div class="card">
+    <h3>Provider Health</h3>
+    <div class="provider-grid" id="provider-grid"><div class="loading">Loading...</div></div>
+</div>
+
+<div class="card">
+    <h3>Recent Errors</h3>
+    <div id="recent-errors"><div class="loading">Loading...</div></div>
+</div>
+
+<script>
+async function loadDashboard() {
+    const resp = await fetch('/admin/api/stats');
+    const data = await resp.json();
+
+    document.getElementById('stat-users').textContent = data.total_users || 0;
+    document.getElementById('stat-recs').textContent = data.recs_today || 0;
+    document.getElementById('stat-interactions').textContent = data.total_interactions || 0;
+    document.getElementById('stat-errors').textContent = data.total_errors || 0;
+    document.getElementById('stat-queue').textContent = (data.queue || {}).pending || 0;
+
+    const providers = data.providers || {};
+    const grid = document.getElementById('provider-grid');
+    grid.innerHTML = Object.entries(providers).map(([name, info]) => {
+        const state = info.state || 'unknown';
+        const calls = info.daily_calls_today || 0;
+        const budget = info.daily_budget || '-';
+        const failures = info.failure_count || 0;
+        return `<div class="provider-card">
+            <h4>${name}</h4>
+            <span class="badge badge-${state}">${state}</span>
+            <div style="margin-top:8px;font-size:13px;color:#666;">
+                Calls today: ${calls} / ${budget}<br>
+                Failures: ${failures}
+            </div>
+            <div class="actions">
+                <button class="btn btn-sm btn-success" onclick="providerAction('${name}','close')">Reset</button>
+                <button class="btn btn-sm btn-danger" onclick="providerAction('${name}','open')">Open</button>
+            </div>
+        </div>`;
+    }).join('');
+
+    const errResp = await fetch('/admin/api/errors?limit=5');
+    const errData = await errResp.json();
+    const errDiv = document.getElementById('recent-errors');
+    if (!errData.errors || !errData.errors.length) {
+        errDiv.innerHTML = '<div class="empty-state">No recent errors</div>';
+    } else {
+        errDiv.innerHTML = '<table>' +
+            '<thead><tr><th>Time</th><th>Type</th><th>Chat ID</th><th>Message</th></tr></thead>' +
+            '<tbody>' + errData.errors.map(e => `<tr>
+                <td>${(e.timestamp || '').slice(0,19)}</td>
+                <td>${e.error_type || ''}</td>
+                <td>${e.chat_id || ''}</td>
+                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;">${(e.error_message || '').slice(0,120)}</td>
+            </tr>`).join('') + '</tbody></table>';
+    }
+}
+async function providerAction(name, action) {
+    await fetch(`/admin/api/provider/${name}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action})
+    });
+    loadDashboard();
+}
+loadDashboard();
+</script>
+{% endblock %}

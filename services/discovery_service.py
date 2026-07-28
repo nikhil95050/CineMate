@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from clients import omdb_client, perplexity_client
+from clients.movie_data_provider import MovieDataProvider
 import config as _config
 
 # Expose supabase_client as a module-level name so that unit tests can patch
@@ -25,7 +26,7 @@ supabase_client = _config.supabase_client
 
 from models.domain import MovieModel, SessionModel, UserModel
 from repositories.movie_metadata_repository import MovieMetadataRepository
-# Lazy accessor to avoid circular import: container.py → discovery_service.py → container.py
+# Lazy accessor to avoid circular import: container.py -> discovery_service.py -> container.py
 def _get_metadata_repo() -> MovieMetadataRepository:
     from services.container import movie_metadata_repo
     return movie_metadata_repo
@@ -39,12 +40,22 @@ _LLM_CANDIDATE_COUNT = 14
 # Module-level sentinel; replaced lazily on first use via _get_metadata_repo()
 _metadata_repo: MovieMetadataRepository | None = None
 
+# MovieDataProvider singleton for TMDB-first enrichment
+_movie_data_provider: MovieDataProvider | None = None
+
 
 def _ensure_metadata_repo() -> MovieMetadataRepository:
     global _metadata_repo
     if _metadata_repo is None:
         _metadata_repo = _get_metadata_repo()
     return _metadata_repo
+
+
+def _get_movie_data_provider() -> MovieDataProvider:
+    global _movie_data_provider
+    if _movie_data_provider is None:
+        _movie_data_provider = MovieDataProvider()
+    return _movie_data_provider
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +180,26 @@ def _extract_json_array(raw: str) -> List[Dict[str, Any]]:
             return []
 
 
+def _tmdb_result_to_movie(result: dict[str, Any]) -> Optional[MovieModel]:
+    """Convert a TMDB search/trending/similar result into a MovieModel stub."""
+    title = str(result.get("title") or "").strip()
+    if not title:
+        return None
+    movie_id = result.get("imdb_id") or result.get("tmdb_id") or f"tmdb_{result.get('tmdb_id', '')}"
+    rating = result.get("rating")
+    return MovieModel(
+        movie_id=movie_id,
+        title=title,
+        year=result.get("year"),
+        rating=float(rating) if rating is not None else None,
+        genres=result.get("genres"),
+        description=result.get("description"),
+        poster=result.get("poster_url"),
+        trailer=result.get("trailer_url"),
+        reason=f"Trending on TMDB (popularity: {result.get('popularity', 'N/A')})" if result.get("popularity") else "Curated from TMDB",
+    )
+
+
 def _llm_item_to_movie(item: Dict[str, Any]) -> Optional[MovieModel]:
     """Convert one LLM-returned dict into a MovieModel stub."""
     title = str(item.get("title") or "").strip()
@@ -288,32 +319,51 @@ async def _enrich_with_omdb(
 ) -> MovieModel:
     _repo = repo or _metadata_repo
     try:
-        data = await omdb_client.get_by_title(movie.title, movie.year, chat_id=chat_id)
+        provider = _get_movie_data_provider()
+        data = await provider.get_by_title(movie.title, movie.year, chat_id=chat_id)
         if not data:
             return movie
 
-        imdb_id = data.get("imdbID") or movie.movie_id
-        rating_raw = data.get("imdbRating", "")
-        try:
-            rating = float(rating_raw) if rating_raw and rating_raw != "N/A" else None
-        except ValueError:
-            rating = None
+        source = data.get("source", "omdb")
+        imdb_id = data.get("imdb_id") or data.get("movie_id") or movie.movie_id
+        tmdb_id = data.get("tmdb_id")
+        rating = data.get("rating")
 
-        enriched = movie.model_copy(
-            update={
-                "movie_id": imdb_id,
-                "year": data.get("Year") or movie.year,
-                "rating": rating,
-                "genres": data.get("Genre") or movie.genres,
-                "language": data.get("Language") or movie.language,
-                "description": data.get("Plot") or movie.description,
-                "poster": (
-                    data.get("Poster") if data.get("Poster") != "N/A" else None
-                ),
-            }
-        )
+        update_fields: dict[str, Any] = {
+            "movie_id": imdb_id,
+            "year": data.get("year") or movie.year,
+            "rating": float(rating) if rating is not None else None,
+            "genres": data.get("genres") or movie.genres,
+            "language": data.get("language") or movie.language,
+            "description": data.get("description") or movie.description,
+            "poster": data.get("poster_url") or movie.poster,
+        }
 
-        task = asyncio.create_task(_repo.upsert(imdb_id, data))
+        trailer_from_tmdb = data.get("trailer_url")
+        if trailer_from_tmdb and not movie.trailer:
+            update_fields["trailer"] = trailer_from_tmdb
+
+        enriched = movie.model_copy(update=update_fields)
+
+        storage_data = {
+            "imdbID": imdb_id,
+            "tmdb_id": tmdb_id,
+            "Title": data.get("title") or movie.title,
+            "Year": data.get("year") or movie.year,
+            "imdbRating": str(rating) if rating is not None else "N/A",
+            "Genre": data.get("genres") or movie.genres or "",
+            "Language": data.get("language") or movie.language or "",
+            "Plot": data.get("description") or "",
+            "Poster": data.get("poster_url") or "",
+            "source": source,
+            "popularity": data.get("popularity"),
+            "backdrop_url": data.get("backdrop_url"),
+            "cast": data.get("cast") or [],
+            "director": data.get("director"),
+            **data,
+        }
+
+        task = asyncio.create_task(_repo.upsert(imdb_id, storage_data))
         task.add_done_callback(
             lambda t: t.exception() and logger.error("Upsert failed for %s: %s", imdb_id, t.exception())
         )
@@ -323,12 +373,12 @@ async def _enrich_with_omdb(
     except Exception as exc:
         _emit_error(
             chat_id=chat_id,
-            error_type="omdb_enrichment_error",
+            error_type="movie_data_enrichment_error",
             message=f"{movie.title}: {exc}",
             step="discovery._enrich_with_omdb",
             intent="enrichment",
         )
-        logger.warning("OMDb enrichment failed for %r -- keeping stub: %s", movie.title, exc)
+        logger.warning("MovieDataProvider enrichment failed for %r -- keeping stub: %s", movie.title, exc)
         return movie
 
 
@@ -393,6 +443,20 @@ class DiscoveryService:
         if not star_name:
             return []
 
+        provider = _get_movie_data_provider()
+        tmdb_client_ = provider._tmdb
+        person = await tmdb_client_.search_person(name=star_name, chat_id=chat_id)
+        if person and person.get("id"):
+            person_id = person["id"]
+            person_movies = await tmdb_client_.get_person_movies(
+                person_id=person_id, chat_id=chat_id
+            )
+            if person_movies:
+                movies = [_tmdb_result_to_movie(r) for r in person_movies]
+                movies = [m for m in movies if m is not None]
+                if movies:
+                    return movies
+
         prompt = _build_star_prompt(star_name)
         raw = await perplexity_client.chat(
             messages=[
@@ -423,7 +487,6 @@ class DiscoveryService:
                 step="discovery.get_star_movies",
                 intent="star",
                 request_id=request_id,
-                raw_payload=raw[:500],
             )
             logger.warning("LLM response for star=%r could not be parsed", star_name)
             return []
@@ -461,6 +524,28 @@ class DiscoveryService:
         chat_id: str = "system",
         request_id: str = "N/A",
     ) -> List[MovieModel]:
+        provider = _get_movie_data_provider()
+
+        if mode == "trending":
+            trending = await provider.get_trending(chat_id=chat_id)
+            if trending:
+                movies = [_tmdb_result_to_movie(r) for r in trending]
+                movies = [m for m in movies if m is not None]
+                if movies:
+                    return movies
+
+        if mode in ("movie", "more_like") and seed_title:
+            tmdb_results = await provider.search(query=seed_title, chat_id=chat_id, limit=1)
+            if tmdb_results:
+                tmdb_id = tmdb_results[0].get("tmdb_id")
+                if tmdb_id:
+                    similar = await provider.get_similar(movie_id=tmdb_id, chat_id=chat_id)
+                    if similar:
+                        movies = [_tmdb_result_to_movie(r) for r in similar]
+                        movies = [m for m in movies if m is not None]
+                        if movies:
+                            return movies
+
         prompt = self._build_prompt(mode, session, user, seed_title, seen_titles or [])
 
         raw = await perplexity_client.chat(

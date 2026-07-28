@@ -39,6 +39,7 @@ DAILY_BUDGET: dict[str, int] = {
     "perplexity": 500,
     "omdb":       1_000,
     "watchmode":  500,
+    "tmdb":       1_000,
 }
 
 

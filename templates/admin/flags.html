@@ -1,0 +1,35 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="topbar"><h1>Feature Flags</h1></div>
+<div class="card">
+    <table id="flags-table">
+        <thead><tr><th>Key</th><th>Value</th><th>Action</th></tr></thead>
+        <tbody><tr><td colspan="3" class="loading">Loading...</td></tr></tbody>
+    </table>
+</div>
+<script>
+async function loadFlags() {
+    const resp = await fetch('/admin/api/flags');
+    const data = await resp.json();
+    const tbody = document.querySelector('#flags-table tbody');
+    const rows = data.flags.map(f => `<tr>
+        <td><code>${f.key}</code></td>
+        <td><span class="badge ${f.value === 'true' ? 'badge-ok' : 'badge-err'}">${f.value}</span></td>
+        <td>
+            <div class="toggle ${f.value === 'true' ? 'active' : ''}"
+                 onclick="toggleFlag('${f.key}', '${f.value === 'true' ? 'false' : 'true'}')"></div>
+        </td>
+    </tr>`).join('');
+    tbody.innerHTML = rows;
+}
+async function toggleFlag(key, value) {
+    await fetch('/admin/api/flags', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({key, value})
+    });
+    loadFlags();
+}
+loadFlags();
+</script>
+{% endblock %}

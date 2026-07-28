@@ -1,0 +1,38 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="topbar"><h1>API Usage</h1></div>
+<div class="card">
+    <table id="usage-table">
+        <thead><tr><th>Provider</th><th>Calls</th><th>Tokens</th><th>Users</th><th>Est. Cost (USD)</th></tr></thead>
+        <tbody><tr><td colspan="5" class="loading">Loading...</td></tr></tbody>
+    </table>
+</div>
+<div class="card">
+    <h3>Top Users</h3>
+    <table id="top-users">
+        <thead><tr><th>Chat ID</th><th>Interactions</th></tr></thead>
+        <tbody><tr><td colspan="2" class="loading">Loading...</td></tr></tbody>
+    </table>
+</div>
+<script>
+async function load() {
+    const resp = await fetch('/admin/api/usage?hours=24');
+    const data = await resp.json();
+    const providers = data.providers || [];
+    document.querySelector('#usage-table tbody').innerHTML = providers.map(p => `<tr>
+        <td><strong>${p.provider}</strong></td>
+        <td>${p.calls}</td>
+        <td>${p.total_tokens || 0}</td>
+        <td>${p.unique_users || 0}</td>
+        <td>$${p.estimated_cost_usd || '0.00'}</td>
+    </tr>`).join('');
+    const users = data.top_users || [];
+    document.querySelector('#top-users tbody').innerHTML = users.map(u => `<tr>
+        <td><code>${u.chat_id}</code></td>
+        <td>${u.interactions}</td>
+    </tr>`).join('');
+    document.getElementById('total-cost').textContent = '$' + (data.total_estimated_cost_usd || '0.00');
+}
+load();
+</script>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="topbar"><h1>Broadcast Message</h1></div>
+<div class="card">
+    <p style="margin-bottom:15px;">Send a message to all bot users.</p>
+    <textarea id="broadcast-msg" rows="4" placeholder="Type your message here..."></textarea>
+    <div style="margin-top:12px;">
+        <button class="btn btn-primary" onclick="send()">Send Broadcast</button>
+    </div>
+    <div id="broadcast-result" style="margin-top:15px;"></div>
+</div>
+<script>
+async function send() {
+    const msg = document.getElementById('broadcast-msg').value.trim();
+    if (!msg) return alert('Enter a message');
+    if (!confirm(`Send to all users?\n\n${msg}`)) return;
+    const resp = await fetch('/admin/api/broadcast', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message: msg})
+    });
+    const data = await resp.json();
+    document.getElementById('broadcast-result').innerHTML = `<p class="badge-ok" style="padding:10px;">Sent to ${data.sent_to} users</p>`;
+}
+</script>
+{% endblock %}

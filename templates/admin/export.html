@@ -1,0 +1,28 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="topbar"><h1>Data Export</h1></div>
+<div class="card">
+    <p style="margin-bottom:15px;">Enter a Telegram chat ID to download all data for that user as JSON.</p>
+    <div class="flex-row">
+        <input type="text" id="chat-id" placeholder="Chat ID..." style="max-width:300px;">
+        <button class="btn btn-primary" onclick="exportUser()">Export</button>
+    </div>
+    <div id="export-result" style="margin-top:15px;"></div>
+</div>
+<script>
+async function exportUser() {
+    const chatId = document.getElementById('chat-id').value.trim();
+    if (!chatId) return alert('Enter a chat ID');
+    const resp = await fetch(`/admin/api/users/${chatId}/export`);
+    if (!resp.ok) return document.getElementById('export-result').innerHTML = '<p class="badge-err" style="padding:10px;">Export failed</p>';
+    const data = await resp.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cinemate_export_${chatId}.json`;
+    a.click();
+    document.getElementById('export-result').innerHTML = '<p class="badge-ok" style="padding:10px;">Export downloaded</p>';
+}
+</script>
+{% endblock %}
